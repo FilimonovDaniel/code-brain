@@ -42,7 +42,7 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 TEMPLATES = SKILL_DIR / "assets" / "templates"
 
 # Claude Code ersetzt Hook-Ausgaben über 10.000 Zeichen durch eine Vorschau.
-CONTEXT_BUDGET = 9000
+CONTEXT_BUDGET = 9300
 NUDGE_AFTER_PROMPTS = 8          # Stop-Hook erinnert nach so vielen Nachrichten ohne Doku
 ARCHIVE_AFTER_DAYS = 14          # erledigte Todos/Features wandern danach ins Archiv
 STAND_MAX_CHARS = 3500
@@ -420,8 +420,12 @@ def build_context(vault: Path, cwd: Path, sync_note: str = "") -> str:
     slug, entry, how = detect_project(vault, cwd)
     cmd = cli_cmd()
     parts: list[str] = []
-    glob_rules = read_text(vault / "global" / "Regeln.md")
-    _, glob_body = parse_frontmatter(glob_rules)
+    if sync_note:
+        parts.append(f"> [!warning] Sync\n> {sync_note}")
+    _, glob_body = parse_frontmatter(read_text(vault / "global" / "Regeln.md"))
+    glob_body = re.sub(r"^#\s.*\n?", "", strip_comments(glob_body), count=1).strip()
+    # Reihenfolge = Wichtigkeit: wird es zu lang, wird hinten gekürzt (Index, Verlauf), nie die Regeln.
+    glob_part = "## Globale Regeln\n" + clip(glob_body, 2000, "global/Regeln.md") if glob_body else ""
 
     if not slug and is_generic_dir(cwd):
         parts.append(
@@ -453,6 +457,9 @@ def build_context(vault: Path, cwd: Path, sync_note: str = "") -> str:
             f"Skript: `{cmd}`"
         )
         parts.append(CORE_RULES.format(cmd=cmd))
+        if glob_part:
+            parts.append(glob_part)
+            glob_part = ""
         _, stand = parse_frontmatter(read_text(base / "Stand.md"))
         stand = re.sub(r"^#\s.*\n?", "", strip_comments(stand), count=1).strip()
         stand = re.sub(r"^(#{2,5})\s", r"#\1 ", stand, flags=re.M)     # unter "## Stand" einruecken
@@ -470,8 +477,8 @@ def build_context(vault: Path, cwd: Path, sync_note: str = "") -> str:
             if str(meta.get("status", "")).lower() in ACTIVE_FEATURE:
                 todos += [f"{t}  _({p.stem})_" for t in open_todos(body)]
         if todos:
-            shown = todos[:25]
-            more = f"\n- ... und {len(todos) - 25} weitere" if len(todos) > 25 else ""
+            shown = [t if len(t) <= 150 else t[:147] + "..." for t in todos[:20]]
+            more = f"\n- ... und {len(todos) - 20} weitere" if len(todos) > 20 else ""
             parts.append("## Offene Todos\n" + "\n".join(shown) + more)
 
         _, plan = parse_frontmatter(read_text(base / "Plan.md"))
@@ -480,36 +487,43 @@ def build_context(vault: Path, cwd: Path, sync_note: str = "") -> str:
             parts.append("## Plan - als Nächstes\n" + clip(nxt, 1200, f"{rel}/Plan.md"))
 
         _, idx = parse_frontmatter(read_text(base / "Index.md"))
-        idx_lines, heading = [], ""
+        idx_lines, heading, group = [], "", ""
+        wissen: list[str] = []
         for l in idx.splitlines():
             if l.startswith("## "):
-                heading = "#" + l
+                heading, group = "#" + l, l[3:].lower()
             elif l.startswith("- ") and "(noch nichts)" not in l:
+                # Im Kontext reicht der Name - der volle Pfad ergibt sich aus Ordner + Name.
+                short = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", l)
+                if group.startswith("wissen"):
+                    wissen.append(short[2:].split(" - ", 1)[0])   # Thema steht im Namen
+                    continue
                 if heading:
                     idx_lines.append(heading)
                     heading = ""
-                idx_lines.append(l)
+                idx_lines.append(short if len(short) <= 160 else short[:157] + "...")
+        if wissen:
+            idx_lines.append("### Wissen\n- " + ", ".join(wissen))
         if idx_lines:
-            parts.append("## Index (aktive Notizen)\n" + clip("\n".join(idx_lines), 2500, f"{rel}/Index.md"))
+            parts.append(f"## Index (aktive Notizen, Dateien unter `{rel}/<ordner>/<Name>.md`)\n"
+                         + clip("\n".join(idx_lines), 3500, f"{rel}/Index.md"))
 
         sess_dir = base / "sessions"
         if sess_dir.is_dir():
             sessions = sorted(sess_dir.glob("*.md"))
             if sessions:
                 _, last = parse_frontmatter(read_text(sessions[-1]))
-                bullets = [l for l in last.splitlines() if l.startswith("- ")][-6:]
+                bullets = [re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", l)[:200]
+                           for l in last.splitlines() if l.startswith("- ")][-6:]
                 if bullets:
                     parts.append(f"## Letzte Session ({sessions[-1].stem})\n" + "\n".join(bullets))
 
-    glob_body = re.sub(r"^#\s.*\n?", "", strip_comments(glob_body), count=1).strip()
-    if glob_body:
-        parts.append("## Globale Regeln\n" + clip(glob_body, 1500, "global/Regeln.md"))
-    if sync_note:
-        parts.append(f"> [!warning] Sync\n> {sync_note}")
+    if glob_part:
+        parts.append(glob_part)
 
     out = "\n\n".join(parts)
     # Gemessen wird die JSON-kodierte Länge - so zählt Claude Code das 10.000-Zeichen-Limit.
-    while len(json.dumps(out)) > CONTEXT_BUDGET + 300 and len(out) > 500:
+    while len(json.dumps(out, ensure_ascii=False)) > CONTEXT_BUDGET + 300 and len(out) > 500:
         out = out[: int(len(out) * 0.9)].rsplit("\n", 1)[0]
         out += "\n... (Kontext gekürzt - Rest NICHT geladen, im Vault lesen: Stand.md, Todos.md, Index.md)"
     return out
