@@ -1,0 +1,14 @@
+{
+  "name": "code-brain",
+  "description": "code-brain: automatisches Projekt-Memory fuer Claude Code in einem Obsidian-Vault",
+  "owner": {
+    "name": "Daniel Filimonov"
+  },
+  "plugins": [
+    {
+      "name": "code-brain",
+      "source": "./",
+      "description": "Automatisches Projekt-Memory fürs Coding in einem zentralen Obsidian-Vault mit Git-Sync."
+    }
+  ]
+}
