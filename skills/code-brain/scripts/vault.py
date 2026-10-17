@@ -1098,9 +1098,11 @@ def cmd_sync(a) -> None:
 # --------------------------------------------------------------------------- Hooks
 
 def hook_payload() -> dict:
+    # Claude Code schickt UTF-8; unter Windows wäre sys.stdin cp1252 -> Umlaute in Pfaden kaputt.
     try:
-        return json.loads(sys.stdin.read() or "{}")
-    except json.JSONDecodeError:
+        raw = sys.stdin.buffer.read().decode("utf-8-sig", errors="replace")
+        return json.loads(raw or "{}")
+    except (json.JSONDecodeError, OSError, AttributeError):
         return {}
 
 
