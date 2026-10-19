@@ -70,6 +70,10 @@ ACTIVE_STATUS = {"geplant", "in-arbeit", "review", "blockiert", ""}
 PLAN_TOOLS = {"TodoWrite", "TaskCreate", "mcp__ccd_turn__update_plan"}
 END_TOOLS = {"mcp__ccd_turn__wrap_up"}
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+SHELL_TOOLS = {"Bash", "PowerShell"}
+# Gesperrt nach einer neuen Aufgabenliste, bis `vault.py search` gelaufen ist. Lesen (Read/Grep/Glob) bleibt frei.
+GATE_TOOLS = WRITE_TOOLS | SHELL_TOOLS | {"Agent", "Task", "Workflow", "mcp__ccd_session__start_session"}
+SEARCH_GRACE = 300               # Suche bis so viele Sekunden vor dem Aufgabenstart zählt (paralleler Aufruf)
 
 
 # --------------------------------------------------------------------------- Grundlagen
@@ -362,7 +366,8 @@ def wissen_names(d: Path) -> list[str]:
 # --------------------------------------------------------------------------- Kontext
 
 CORE_RULES = """\
-**code-brain - so pflegst du das Memory (Details im Skill `code-brain`):**
+**code-brain - zuerst den Skill `code-brain` mit dem Skill-Tool laden (vor der ersten Antwort).**
+- Nach jeder neuen Aufgabenliste sind Bash/PowerShell, Edit/Write, Agent und neue Sessions gesperrt, bis `{cmd} search "<begriffe>"` gelaufen ist.
 - Jede Information an genau einem Ort: was dauerhaft gilt und was verworfen ist → `Projekt.md`; was läuft und was kommt → `Arbeitsstand.md`; alles zu einem Feature/Bug (Ziel, Todos, Festgelegt, Ergebnis) → `arbeitspakete/<nr-name>.md`; wie etwas geht → `wissen/` (ohne Projekt: `global/wissen/`).
 - Sofort eintragen, wenn der Nutzer etwas entscheidet, ändert oder streicht. Aufgabenstart: erst `{cmd} search "<begriffe>"`, Treffer lesen, dann Arbeitspaket + Arbeitsstand. Aufgabenende: Ergebnis + Arbeitsstand.
 - Unwichtiges löschen statt sammeln, nichts doppelt. Frontmatter: `type`, `summary`, `stichworte`, `updated`."""
@@ -957,8 +962,9 @@ def cmd_sync(a) -> None:
 
 # --------------------------------------------------------------------------- Hooks
 #
-# Grundsatz: Kein Hook erzwingt eine Extra-Runde. Hinweise gehen als additionalContext mit dem
-# nächsten Tool-Ergebnis oder der nächsten Nutzer-Nachricht mit; Stop und SessionEnd speichern nur.
+# Grundsatz: Hinweise gehen als additionalContext mit dem nächsten Tool-Ergebnis oder der nächsten
+# Nutzer-Nachricht mit; Stop und SessionEnd speichern nur. Zwei Ausnahmen sperren per PreToolUse:
+# Arbeitswerkzeuge vor der Suche (search_gate) und der Abschluss bei unverändertem Arbeitsstand.
 
 def hook_payload() -> dict:
     # Claude Code schickt UTF-8; unter Windows wäre sys.stdin cp1252 -> Umlaute in Pfaden kaputt.
@@ -1080,8 +1086,8 @@ def plan_items(tool: str, ti: dict) -> tuple[list[str], bool] | None:
 
 
 def start_hint(slug: str, base: Path, title: str) -> str:
-    return (f"code-brain: Neue Aufgabe „{title}“ im Projekt `{slug}`. Vor dem Planen: "
-            f'`{cli_cmd()} search "<begriffe der aufgabe>"` und die Treffer lesen (Arbeitspaket, Wissen, '
+    return (f"code-brain: Neue Aufgabe „{title}“ im Projekt `{slug}`. Bash, Edit/Write und Agenten sind gesperrt "
+            f'bis zur Suche: `{cli_cmd()} search "<begriffe der aufgabe>"`, Treffer lesen (Arbeitspaket, Wissen, '
             f"Projektregeln). Dann `{(base / PAKETE_DIR).as_posix()}/<nr-name>.md` anlegen oder aktualisieren (Ziel, Todos) und "
             "in `Arbeitsstand.md` › In Arbeit eintragen. Ist es keine Projektarbeit, ignorieren.")
 
@@ -1193,14 +1199,50 @@ def hook_post_tool(payload: dict) -> None:
     emit_context("PostToolUse", hints)
 
 
+def is_vault_cmd(ti: dict) -> bool:
+    return "vault.py" in str(ti.get("command", ""))
+
+
+def is_search_cmd(ti: dict) -> bool:
+    return bool(re.search(r"vault\.py[\"']?\s+search\b", str(ti.get("command", ""))))
+
+
+def search_gate(vault: Path, sid: str, tool: str, ti: dict) -> None:
+    """Nach einer neuen Aufgabenliste Arbeitswerkzeuge sperren, bis `vault.py search` gelaufen ist."""
+    st = load_state(vault, sid)
+    if tool in SHELL_TOOLS and is_search_cmd(ti):
+        st["last_search"] = now_ts()
+        save_state(vault, sid, st)
+        return
+    if tool in SHELL_TOOLS and is_vault_cmd(ti):
+        return                          # check, new, link usw. bleiben frei
+    task = st.get("task") or {}
+    if not task.get("open") or not st.get("slug"):
+        return
+    if float(st.get("last_search", 0)) >= float(task.get("started", 0)) - SEARCH_GRACE:
+        return
+    emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                 "permissionDecisionReason":
+                                     f"code-brain: Gesperrt, bis der Vault durchsucht ist. Zuerst "
+                                     f'`{cli_cmd()} search "<begriffe der aufgabe>"` ausführen und die Treffer '
+                                     "lesen (falls noch nicht geschehen, vorher den Skill `code-brain` laden). "
+                                     "Danach diesen Aufruf wiederholen."}})
+
+
 def hook_pre_tool(payload: dict) -> None:
-    """Abschluss (wrap_up): Ist Arbeitsstand.md seit dem Aufgabenstart unverändert, einmal zurückhalten,
-    damit das Eintragen vor der Abschlussmeldung passiert und nicht danach."""
+    """Sperre vor der Suche (search_gate) und Abschluss (wrap_up): Ist Arbeitsstand.md seit dem
+    Aufgabenstart unverändert, einmal zurückhalten, damit das Eintragen vor der Abschlussmeldung passiert."""
     vault = vault_root(required=False)
-    if not vault or payload.get("tool_name", "") not in END_TOOLS:
+    if not vault:
+        return
+    tool = payload.get("tool_name", "")
+    sid = payload.get("session_id", "")
+    if tool in GATE_TOOLS:
+        search_gate(vault, sid, tool, payload.get("tool_input") or {})
+        return
+    if tool not in END_TOOLS:
         return
     cwd = Path(payload.get("cwd") or os.getcwd())
-    sid = payload.get("session_id", "")
     slug, _, _ = detect_project(vault, cwd)
     if not slug:
         return

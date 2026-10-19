@@ -4,7 +4,7 @@ Automatisches Memory für Claude Code in einem zentralen Obsidian-Vault - für P
 
 - **Kein Befehl nötig:** Beim Session-Start erkennt code-brain das Projekt am Ordner (Pfad, sonst Git-Remote) und lädt Arbeitsregeln, Projektsteckbrief mit Projektregeln und Verworfenem, Arbeitsstand, offene Arbeitspakete und die Wissensthemen - fest begrenzt, egal wie groß das Projekt ist.
 - **Jede Information an genau einem Ort:** `Projekt.md` (was dauerhaft gilt), `Arbeitsstand.md` (was läuft und kommt), `arbeitspakete/` (je Feature/Bug alles inkl. Ergebnis), `wissen/` (Nachschlagen, auch global).
-- **Erinnert, ohne zu blockieren:** Hinweise beim Aufgabenstart (Task-Liste), beim Aufgabenende (Abschluss), nach 8 Nachrichten ohne Eintrag, nach Abbruch und nach Komprimierung - immer als Kontext, nie als erzwungene Extra-Runde.
+- **Erinnert und sperrt, wo nötig:** Nach einer neuen Task-Liste sind Bash/PowerShell, Edit/Write, Agenten und neue Sessions gesperrt, bis `vault.py search` gelaufen ist. Sonst Hinweise beim Aufgabenende (Abschluss), nach 8 Nachrichten ohne Eintrag, nach Abbruch und nach Komprimierung.
 - **Kein Archiv:** Unwichtiges wird gelöscht, die Git-Historie des Vaults behält alles.
 - **Mehrere Geräte:** Der Vault ist ein Git-Repo. Beim Start wird gepullt, nach jeder Antwort mit Änderungen committet und gepusht, mit Schutz vor Zugangsdaten.
 - **Schlank:** nur Python-Standardbibliothek und Git, kein MCP, keine Datenbank.
@@ -48,6 +48,7 @@ projekte/<slug>/
 | `SessionStart` | Pull, Startkontext; nach Komprimierung Hinweis zum Nachtragen; meldet nicht abgeschlossene Aufgaben früherer Sessions |
 | `UserPromptSubmit` | Hinweis nach 8 Nachrichten ohne Vault-Eintrag, nach abgebrochener Antwort, bei gestopptem Commit |
 | `PostToolUse` | Formatprüfung geschriebener Notizen; Task-Liste angelegt → Hinweis Aufgabenstart; alle Todos erledigt → Hinweis Aufgabenende |
+| `PreToolUse` (Arbeitswerkzeuge) | offene Aufgabe ohne `vault.py search` → Bash/PowerShell, Edit/Write, Agent, Workflow, neue Session gesperrt; Lesen bleibt frei |
 | `PreToolUse` (`mcp__ccd_turn__wrap_up`) | Abschluss ohne aktualisierten Arbeitsstand → einmal zurückgehalten mit Hinweis |
 | `Stop`, `PreCompact`, `SessionEnd` | Commit + Push des Vaults, blockieren nie |
 
