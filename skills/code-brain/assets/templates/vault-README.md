@@ -1,23 +1,19 @@
 # code-brain Vault
 
-Projekt-Memory für Claude Code, angelegt am {{date}}. Wird von Claude automatisch gepflegt - du kannst jederzeit lesen und von Hand korrigieren.
+Memory für Claude Code, angelegt am {{date}}. Claude pflegt es selbst - du kannst jederzeit lesen und korrigieren.
 
-## Aufbau
+Jede Information steht an genau einem Ort:
 
 ```
-_brain/projekte/          je Projekt eine JSON: Zuordnung Ordner/Git-Remote -> Projekt (nicht von Hand nötig)
-global/Regeln.md          gilt für alle Projekte, wird immer geladen
+global/
+  Arbeitsregeln.md           wie Claude mit dir arbeitet (immer geladen)
+  wissen/<Thema>.md          Wissen ohne Projekt: Server, Tools, Recherchen
 projekte/<slug>/
-  <slug>.md               Projekt-Hub: Zweck, Stack, Konventionen, "Nicht tun"
-  Stand.md                aktueller Ist-Stand + nächster Schritt (wird überschrieben)
-  Plan.md                 als Nächstes / später / Ideen / verworfen
-  Todos.md                offene Aufgaben außerhalb von Features
-  Index.md                automatisch: eine Zeile pro aktiver Notiz
-  features/               je Feature/Branch: Ziel, Stand, Todos, Scratchpad
-  entscheidungen/         je Entscheidung eine Notiz (aktiv / ersetzt / verworfen)
-  wissen/                 Stolperstellen, Befehle, Architektur
-  sessions/               kurzer Verlauf pro Tag
-  archiv/                 Ausgemistetes - bleibt durchsuchbar, wird nicht mehr geladen
+  Projekt.md                 Zweck, Technik, Projektregeln, Verworfen (immer geladen)
+  Arbeitsstand.md            in Arbeit, nächste Schritte, offene Fragen, später, zuletzt abgeschlossen (immer geladen)
+  arbeitspakete/<nr-name>.md je Feature/Bug/Issue: Ziel, Stand, Todos, Festgelegt, Ergebnis
+  wissen/<Thema>.md          Befehle, Stolperstellen, Architektur
+_brain/projekte/             Zuordnung Ordner/Git-Remote -> Projekt (automatisch)
 ```
 
-`.brain-state/` ist lokal und steht nicht im Git.
+Kein Archiv: Unwichtiges wird gelöscht, die Git-Historie behält alles. `.brain-state/` ist lokal und steht nicht im Git.

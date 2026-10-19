@@ -1,102 +1,88 @@
 ---
 name: code-brain
-description: Automatisches Projekt-Memory für Coding-Projekte in einem zentralen Obsidian-Vault. Nutze diesen Skill immer, wenn der Startkontext "code-brain" erwähnt, wenn ein Hook "code-brain:" meldet, wenn du Entscheidungen, Todos, Pläne, Ist-Stand, Feature-Fortschritt oder Projektwissen festhalten oder nachschlagen willst, wenn ein neues Projekt angelegt oder code-brain eingerichtet werden soll - auch wenn der Nutzer das Memory nicht ausdrücklich erwähnt. Der Nutzer gibt nie Befehle dafür; du pflegst das Memory selbstständig.
+description: Automatisches Memory für Coding-Projekte und allgemeine Themen in einem zentralen Obsidian-Vault. Nutze diesen Skill immer, wenn der Startkontext "code-brain" erwähnt, wenn ein Hook "code-brain:" meldet, wenn der Nutzer etwas entscheidet, ändert oder streicht, wenn eine Aufgabe beginnt oder endet, wenn du Projektwissen oder Wissen zu einem Thema festhalten oder nachschlagen willst, wenn ein neues Projekt angelegt oder code-brain eingerichtet werden soll - auch wenn der Nutzer das Memory nicht erwähnt. Der Nutzer gibt nie Befehle dafür; du pflegst das Memory selbstständig.
 ---
 
-# code-brain - Projekt-Memory im Obsidian-Vault
+# code-brain
 
-Die nächste Session weiß nichts von dieser. Das Einzige, was sie erbt, ist der Vault. Deshalb pflegst du ihn selbstständig, laufend und so, dass jede Version eine vollständige Übergabe ist: Der Nutzer kann die Session jederzeit schließen, und der aktuelle Stand ist gesichert. Der Nutzer ruft dafür nie etwas auf und soll auch nicht gefragt werden, ob dokumentiert werden soll.
+Ziel: Jeder neue Claude-Agent weiß so viel wie seine Vorgänger. Er erbt nur den Vault. Deshalb pflegst du ihn selbstständig, ohne Ankündigung und ohne Rückfrage - der Nutzer soll nie daran erinnern müssen.
 
-## Was automatisch passiert (nicht doppelt machen)
+## 1. Aufbau - jede Information an genau einem Ort
 
-| Zeitpunkt | Hook | Wirkung |
+| Datei | Steht drin | Beim Start geladen |
 |---|---|---|
-| Session-Start | `SessionStart` | holt Updates aus dem Git-Remote, erkennt das Projekt am Ordner (Git-Remote, sonst Pfad), mistet aus, erzeugt `Index.md` neu und lädt Stand, Todos, "Als Nächstes", "Nicht tun", Index und letzte Session in deinen Kontext |
-| nach jedem Schreiben | `PostToolUse` | prüft Vault-Notizen auf Frontmatter, Tags und Zugangsdaten und meldet Fehler sofort |
-| Ende jeder Antwort | `Stop` | Code geändert, Vault nicht -> du musst nachdokumentieren. Vault geändert -> Index neu, Commit + Push |
-| Session-Ende | `SessionEnd` | letzter Commit + Push |
+| `global/Arbeitsregeln.md` | Wie Claude mit dem Nutzer arbeitet | ja, ganz |
+| `global/wissen/<Thema>.md` | Wissen ohne Projekt (Server, Tools, Recherchen) | nur Name |
+| `projekte/<slug>/Projekt.md` | Zweck, Technik, **Projektregeln** (was dauerhaft gilt, auch was nie getan wird; je Zeile: Regel - Grund (Datum)), **Verworfen** (Ideen, die bewusst nicht gemacht werden) | ja, ganz |
+| `projekte/<slug>/Arbeitsstand.md` | In Arbeit · Nächste Schritte · Offene Fragen · Später · Zuletzt abgeschlossen (max. 5) | ja, ganz |
+| `projekte/<slug>/arbeitspakete/<nr-name>.md` | ein Feature/Bug/Issue: Ziel · Stand · Todos · Festgelegt · Ergebnis | offene: Name + Status + summary |
+| `projekte/<slug>/wissen/<Thema>.md` | Befehle, Stolperstellen, Architektur | nur Name |
 
-Der Startkontext ist also schon da - lies `Stand.md`, `Todos.md` usw. nicht noch einmal, außer du brauchst den vollen Text. Den Pfad zum Skript (`vault.py`) und zum Projektordner nennt der Startkontext.
+Formate und Beispiele: `references/formate.md`.
 
-## Wann du schreibst
+## 2. Was wohin
 
-Schreib nach jedem Schritt, der für die Zukunft zählt - während der Arbeit, nicht gesammelt am Ende:
+- Entscheidung gilt fürs ganze Projekt und dauerhaft → **Projektregel** in `Projekt.md`.
+- Entscheidung gilt nur für ein Feature → **Festgelegt** im Arbeitspaket.
+- Idee oder Ansatz wird gestrichen und soll nicht wieder vorgeschlagen werden → **Verworfen** in `Projekt.md`. Sonst löschen.
+- Todo zu einem Arbeitspaket → nur im Arbeitspaket. Todo ohne Paket → `Arbeitsstand` › Nächste Schritte.
+- Wie etwas funktioniert → `wissen/`. Ohne Projektbezug → `global/wissen/` (auch aus Sessions außerhalb eines Projekts).
+- Nie doppelt: `Arbeitsstand` verlinkt aufs Paket, wiederholt es nicht.
 
-- eine Entscheidung ist gefallen oder eine alte wurde gekippt
-- ein Ansatz wurde verworfen (das ist genauso wertvoll: verhindert, dass ihn jemand erneut versucht)
-- Plan oder Reihenfolge haben sich geändert, neue Todos sind entstanden, Todos sind erledigt
-- ein Feature hat den Status gewechselt (begonnen, Review, fertig, PR offen, gemergt)
-- du hast etwas gelernt, das man sonst wieder mühsam herausfinden müsste (Stolperstelle, Befehl, Ursache eines Fehlers, Architekturdetail)
-- der Ist-Stand hat sich spürbar bewegt
+## 3. Wann du schreibst
 
-Nicht dokumentieren: Smalltalk, reine Wissensfragen ohne Projektbezug, Zwischenschritte ohne Folgen, Dinge, die schon im Code oder Git-Log selbsterklärend stehen.
+1. **Der Nutzer entscheidet, ändert oder streicht etwas** ("machen wir so", "out of scope", "doch nicht", "später") → sofort an den Ort aus Abschnitt 2.
+2. **Aufgabenstart** → erst `python "<vault.py>" search "<begriffe der aufgabe>"`, Treffer lesen (Arbeitspaket, Wissen, Projektregeln). Dann Arbeitspaket anlegen oder aktualisieren (Ziel, Todos), `Arbeitsstand` › In Arbeit.
+3. **Während der Arbeit** → Todos abhaken, Festgelegt ergänzen, neues Wissen eintragen. Jeder Eintrag so, als wäre er die letzte Übergabe.
+4. **Aufgabenende** → Paket › Ergebnis (was gebaut, wo: Branch/PR/Dateien, was offen) und Status. `Arbeitsstand`: aus In Arbeit raus, in Zuletzt abgeschlossen rein, Nächste Schritte neu.
+5. **Hinweis vom Hook** (`code-brain: ...`) → prüfen und nachtragen. Ist nichts offen, nichts tun und nichts dazu sagen.
 
-Schreib ohne Ankündigung und ohne Rückfrage, und erwähne es höchstens in einem Halbsatz. Dokumentation ist Nebenarbeit, nicht Thema des Gesprächs.
+Nicht dokumentieren: Smalltalk, Wissensfragen ohne Wert für später, Zwischenschritte ohne Folgen, was im Code oder Git-Log selbsterklärend steht.
 
-## Wohin was gehört
+## 4. Löschen statt Archiv
 
-Alles liegt unter `projekte/<slug>/` (Formate und Vorlagen: `references/formate.md`).
+- Überholte Projektregel → durch die neue ersetzen.
+- Fertiges Arbeitspaket → bleibt mit Ergebnis, damit es auch nach Jahren gefunden wird. Löschen erst, wenn es nichts mehr erklärt (z. B. Funktion wieder ausgebaut).
+- `Arbeitsstand` beschreibt nur das Jetzt; was erledigt oder überholt ist, fliegt raus.
+- Alles Gelöschte bleibt in der Git-Historie des Vaults.
 
-| Inhalt | Ort | Art |
-|---|---|---|
-| Ist-Stand, woran gerade gearbeitet wird, nächster Schritt, Blocker | `Stand.md` | **komplett überschreiben**, < 40 Zeilen |
-| Fahrplan: als Nächstes / später / Ideen / verworfen | `Plan.md` | Abschnitte pflegen |
-| Aufgaben ohne eigenes Feature | `Todos.md` | Checkboxen |
-| ein Feature oder Branch: Ziel, Stand, Todos, Scratchpad | `features/<name>.md` | eine Notiz pro Feature |
-| eine Entscheidung mit Begründung und Alternativen | `entscheidungen/JJJJ-MM-TT <Titel>.md` | eine Notiz pro Entscheidung |
-| Stolperstellen, Befehle, Architektur, Konventionen im Detail | `wissen/<Thema>.md` | thematisch, erweitern statt duplizieren |
-| kurzer Verlauf (was wurde heute gemacht) | `sessions/JJJJ-MM-TT.md` | anhängen, 1 Zeile pro Schritt |
-| Zweck, Stack, Konventionen, **Nicht tun** | `<slug>.md` (Projekt-Hub) | selten ändern |
-| projektübergreifende Regeln/Vorlieben des Nutzers | `global/Regeln.md` | sehr kurz halten |
+## 5. Format
 
-Faustregel für Entscheidungen: Eine eigene Notiz lohnt sich, wenn sie schwer rückgängig zu machen ist, ohne Kontext überraschen würde oder ein echter Zielkonflikt war. Kleinere Festlegungen reichen als Zeile in der Feature-Notiz oder in `Stand.md`.
+- Frontmatter: `type`, `summary` (eine Zeile), `stichworte` (Suchbegriffe, bei Paketen und Wissen Pflicht), `updated: JJJJ-MM-TT`. Pakete zusätzlich `status`, `issue`, `branch`, `pr`.
+- Stichpunkte, keine Prosa, jede Notiz für sich verständlich. Flüchtige Fakten datieren ("CI grün, Stand 2026-10-19").
+- Links mit Pfad: `[[projekte/<slug>/arbeitspakete/74-berichte-detail|#74]]`.
+- Nichts erfinden, Unbekanntes als `TBD`. Keine Zugangsdaten, nur Verweis ("Key in `Backend/.env`") - sonst stoppt der Commit.
+- `Projekt.md` und `Arbeitsstand.md` unter 2.800 Zeichen, `Arbeitsregeln.md` unter 2.200: Was darüber liegt, wird beim Start abgeschnitten. `check` meldet es.
 
-Jedes Feature bekommt genau eine Notiz, die alles zu seiner Arbeit bündelt: Ziel, aktuellen Stand, Todos und ein Scratchpad.
-- Dateiname nach Branch oder Thema, z. B. `features/74-berichte-detail.md`.
-- Im Frontmatter die Verknüpfung zu Git und Tracker: `branch:`, `issue:`, `pr:`. So findet eine spätere Session vom Branch zur Notiz und umgekehrt.
-- `## Scratchpad` ist für Zwischengedanken beim Arbeiten (Hypothesen, Debug-Notizen, „probiert, ging nicht, weil …“) und darf unordentlich sein. Ist das Feature fertig, räum ihn auf: Wichtiges wandert in eine Entscheidung oder nach `wissen/`, der Rest wird gelöscht.
+## 6. Was automatisch passiert
 
-## Schreibregeln
+| Wann | Was |
+|---|---|
+| Session-Start | Pull aus dem Git-Remote, Projekt am Ordner erkennen, Spalte "ja" aus Abschnitt 1 laden; meldet eine nicht abgeschlossene Aufgabe einer früheren Session |
+| nach Komprimierung (Gespräch zu lang, Claude Code fasst es zusammen) | lädt neu + Hinweis, fehlenden Stand nachzutragen |
+| Task-Liste angelegt | Hinweis Aufgabenstart (3.2) - einmal je neuer Liste |
+| Abschluss (`wrap_up`) oder alle Todos erledigt | Hinweis Aufgabenende (3.4) - nur wenn `Arbeitsstand.md` seit dem Start unverändert ist |
+| Nachricht des Nutzers | Hinweis nach 8 Nachrichten ohne Eintrag oder nach einer abgebrochenen Antwort |
+| Notiz geschrieben | Formatprüfung (Frontmatter, Stichworte, Zugangsdaten) |
+| nach jeder Antwort, vor Komprimierung, Session-Ende | Commit + Push des Vaults. Kein Hook blockiert |
 
-- **Jede Notiz hat Frontmatter** mit `type`, `summary` (eine Zeile - daraus baut der Index die Übersicht, die beim Start geladen wird) und `updated: JJJJ-MM-TT` (bei jeder Änderung auf heute setzen). Ausnahme: `sessions/`.
-- **Tags** als YAML-Liste ohne `#`: `projekt/<slug>`, dazu Art und Thema, z. B. `entscheidung`, `bereich/auth`. Nur Buchstaben, Ziffern, `_ - /`.
-- **Verlinken statt wiederholen**: `[[projekte/<slug>/entscheidungen/2026-10-17 Cache über Postgres|Cache über Postgres]]`. Links in Properties in Anführungszeichen: `ersetzt_durch: "[[...]]"`.
-- **Flüchtige Fakten datieren** ("CI grün", "PR #76 offen", "3 Tests rot"): `(Stand 2026-10-17)` - oder auf die Quelle verweisen. Undatierte Momentaufnahmen werden sonst still falsch.
-- **Nichts erfinden**: Unbekanntes als `TBD` markieren. Bevor du behauptest, etwas sei nicht dokumentiert, im Index nachsehen und `search` nutzen.
-- **Keine Zugangsdaten** in den Vault - nur Verweise ("Key liegt in `Backend/.env`"). Der Commit wird sonst gestoppt.
-- **Kurz und konkret**: Stichpunkte statt Prosa, jede Notiz für sich verständlich (kein "siehe oben"), deutsch.
-- Wiederhole nicht, was im Code steht - halte fest, *warum* etwas so ist und was als Nächstes kommt.
+Der Startkontext ist schon da - lies `Projekt.md` und `Arbeitsstand.md` nicht noch einmal. Pfad zu `vault.py` und zum Projektordner nennt der Startkontext.
 
-## Aktuell halten und ausmisten
+## 7. Nachschlagen
 
-Ziel ist ein kleiner Startkontext, egal wie alt das Projekt ist:
+1. Startkontext (Regeln, Projekt, Arbeitsstand, offene Pakete, Wissensthemen).
+2. Passendes Paket oder Wissensthema öffnen.
+3. Sonst `search "<begriffe>"` (aktuelles Projekt + global; `--all` alle Projekte). Bevor du sagst, etwas sei nicht dokumentiert: suchen.
 
-- `Stand.md` beschreibt nur das Jetzt. Altes fliegt raus (der Verlauf steht in `sessions/`).
-- Überholte Entscheidung: Frontmatter `status: ersetzt` + `ersetzt_durch: "[[neue]]"`, die neue bekommt `ersetzt: "[[alte]]"`. Verworfene Idee oder verworfener Ansatz: `status: verworfen` und eine Zeile unter `Plan.md` -> `## Verworfen` (oder im Hub unter `## Nicht tun`, wenn es ein Verbot ist).
-- Erledigte Todos abhaken mit Datum: `- [x] Aufgabe (2026-10-17)`.
-- Fertige Features: `status: fertig`, Stand und Ergebnis in zwei Zeilen festhalten, Scratchpad leeren.
-- Den Rest erledigt der Session-Start: ersetzte/verworfene Entscheidungen, Features länger als 14 Tage fertig und Todos länger als 14 Tage erledigt wandern nach `archiv/` und tauchen nicht mehr im Startkontext auf. Im Archiv bleibt alles durchsuchbar.
+## 8. Neues Projekt / unbekannter Ordner
 
-## Nachschlagen
-
-1. Startkontext lesen (Stand, Todos, Index).
-2. Für Details den Link aus dem Index öffnen.
-3. Nur wenn das nicht reicht, z. B. bei alten Fehlern oder bei "warum haben wir damals...": `python "<vault.py>" search "<begriffe>"` (Standard: aktuelles Projekt + global; `--archiv` schließt das Archiv ein, `--all` alle Projekte).
-
-Vor dem Planen eines Features, vor einer neuen Entscheidung und wenn der Nutzer sich auf Früheres bezieht ("wie letztes Mal", "das Problem mit dem Login"), lohnt sich ein Blick in Index und ggf. `search`: Gab es dazu schon Entscheidungen oder verworfene Ansätze?
-
-## Neues Projekt / unbekannter Ordner
-
-Meldet der Startkontext "kein Projekt für diesen Ordner":
-
-- Wird hier am Code eines Projekts gearbeitet, leg es an, sobald klar ist, worum es geht: `python "<vault.py>" new --name "<Projektname>" --cwd "<ordner>"`. Danach Hub (Zweck, Stack), `Stand.md` und `Plan.md` mit dem füllen, was du schon weißt.
-- Gehört der Ordner zu einem bestehenden Projekt (anderer Klon, Sammelordner mit Repo + Worktrees): `python "<vault.py>" link <slug> --cwd "<ordner>"`.
-- Ein Repo mit seinen Worktrees ist ein Projekt; erkannt wird es am Git-Remote.
-- Allgemeine Fragen ohne Projektbezug: nichts anlegen.
+- Wird an Code gearbeitet: `python "<vault.py>" new --name "<Projektname>" --cwd "<ordner>"`, dann `Projekt.md` und `Arbeitsstand.md` füllen.
+- Gehört der Ordner zu einem bestehenden Projekt (anderer Klon, Worktree-Sammelordner): `link <slug> --cwd "<ordner>"`.
+- Thema ohne Projekt: Notiz in `global/wissen/`.
 
 ## Einrichtung (einmalig)
 
-Meldet der Startkontext "noch nicht eingerichtet", lies `references/einrichtung.md` und führe den Nutzer durch die Einrichtung (privates Git-Repo + lokaler Vault-Ordner).
+Meldet der Startkontext "noch nicht eingerichtet", lies `references/einrichtung.md`.
 
 ## Befehle
 
@@ -105,9 +91,8 @@ vault.py status                      Konfiguration + erkanntes Projekt
 vault.py new --name "<Name>"         Projekt für den aktuellen Ordner anlegen
 vault.py link <slug>                 Ordner einem Projekt zuordnen
 vault.py context                     Startkontext anzeigen
-vault.py search "<text>" [--archiv] [--all]
-vault.py check [--fix]               Format, tote Links, Größe; --fix archiviert Veraltetes
-vault.py archive <datei>             Notiz sofort archivieren
+vault.py search "<text>" [--all]
+vault.py check [<slug>|--all]        Format, Stichworte, tote Links, Größe, alte Struktur
 vault.py sync pull|push              Git-Sync von Hand
 vault.py init --vault <ordner> --remote <git-url>
 ```

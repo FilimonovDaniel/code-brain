@@ -8,12 +8,14 @@ Nur Python-Standardbibliothek. Ein Skript für alles:
   vault.py new --name "<Name>" [--slug s] [--cwd d]   Projekt für einen Ordner anlegen und registrieren
   vault.py link <slug> [--cwd d]                      weiteren Ordner/Remote einem Projekt zuordnen
   vault.py context [--cwd d]                          Startkontext ausgeben (das, was der Hook einspielt)
-  vault.py index [<slug>]                             Index.md neu erzeugen
-  vault.py search "<text>" [--all] [--archiv] [-n 8]  Stichwortsuche mit Ranking (Notnagel)
-  vault.py check [<slug>] [--fix]                     Pflege: Format, Links, Größe, Ausmisten
-  vault.py archive <datei>                            Notiz ins Archiv des Projekts verschieben
+  vault.py search "<text>" [--all] [-n 8]             Stichwortsuche mit Ranking
+  vault.py check [<slug>] [--all]                     Pflege: Format, Links, Größe
   vault.py sync pull|push                             Vault mit dem Git-Remote abgleichen
-  vault.py hook session-start|stop|session-end        Einstieg für die Claude-Code-Hooks (JSON auf stdin)
+  vault.py hook <ereignis>                            Einstieg für die Claude-Code-Hooks (JSON auf stdin)
+
+Aufbau des Vaults (jede Information an genau einem Ort):
+  global/Arbeitsregeln.md, global/wissen/<Thema>.md
+  projekte/<slug>/Projekt.md, Arbeitsstand.md, arbeitspakete/<nr-name>.md, wissen/<Thema>.md
 
 Konfiguration: ~/.code-brain/config.json  {"vault": "<pfad>"}
 Überschreibbar mit den Umgebungsvariablen CODE_BRAIN_VAULT und CODE_BRAIN_CONFIG.
@@ -43,19 +45,31 @@ TEMPLATES = SKILL_DIR / "assets" / "templates"
 
 # Claude Code ersetzt Hook-Ausgaben über 10.000 Zeichen durch eine Vorschau.
 CONTEXT_BUDGET = 9300
-NUDGE_AFTER_PROMPTS = 8          # Stop-Hook erinnert nach so vielen Nachrichten ohne Doku
-ARCHIVE_AFTER_DAYS = 14          # erledigte Todos/Features wandern danach ins Archiv
-STAND_MAX_CHARS = 3500
+NUDGE_AFTER_PROMPTS = 8          # Hinweis nach so vielen Nutzer-Nachrichten ohne Eintrag im Vault
+STALE_TASK_HOURS = 3             # offene Aufgabe einer anderen, so lange stillen Session gilt als abgebrochen
 GIT_TIMEOUT = 12
 
 PROJECTS_DIR = "projekte"
+GLOBAL_DIR = "global"
 SYSTEM_DIR = "_brain"
 STATE_DIR = ".brain-state"
-CORE_FILES = ("Stand.md", "Plan.md", "Todos.md", "Index.md")
-NOTE_DIRS = ("entscheidungen", "features", "wissen", "sessions")
+RULES_FILE = "Arbeitsregeln.md"
+HUB_FILE = "Projekt.md"
+STAND_FILE = "Arbeitsstand.md"
+PAKETE_DIR = "arbeitspakete"
+WISSEN_DIR = "wissen"
+LEGACY = ("Stand.md", "Plan.md", "Todos.md", "Index.md", "entscheidungen", "features", "sessions", "archiv")
 
-ACTIVE_FEATURE = {"geplant", "in-arbeit", "review", "blockiert"}
-DONE_STATUS = {"fertig", "erledigt", "verworfen", "ersetzt", "archiviert"}
+# Grenzen im Startkontext (Zeichen) - zusammen unter CONTEXT_BUDGET
+MAX_RULES = 2200
+MAX_HUB = 2800
+MAX_STAND = 2800
+
+ACTIVE_STATUS = {"geplant", "in-arbeit", "review", "blockiert", ""}
+
+PLAN_TOOLS = {"TodoWrite", "TaskCreate", "mcp__ccd_turn__update_plan"}
+END_TOOLS = {"mcp__ccd_turn__wrap_up"}
+WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 
 
 # --------------------------------------------------------------------------- Grundlagen
@@ -64,8 +78,8 @@ def today() -> str:
     return dt.date.today().isoformat()
 
 
-def now_hm() -> str:
-    return dt.datetime.now().strftime("%H:%M")
+def now_ts() -> float:
+    return dt.datetime.now().timestamp()
 
 
 def norm_path(p: str | Path) -> str:
@@ -118,6 +132,13 @@ def write_text(p: Path, text: str) -> None:
     tmp = p.with_name(f".{p.name}.tmp")
     tmp.write_text(text, encoding="utf-8", newline="\n")
     os.replace(tmp, p)
+
+
+def mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 GENERIC_DIRS = {"", "desktop", "documents", "dokumente", "downloads", "tmp", "temp"}
@@ -179,18 +200,6 @@ def _scalar(v: str):
     return v
 
 
-def set_frontmatter_field(text: str, key: str, value: str) -> str:
-    m = FM_RE.match(text)
-    if not m:
-        return f"---\n{key}: {value}\n---\n" + text
-    block = m.group(1)
-    if re.search(rf"^{re.escape(key)}:.*$", block, re.M):
-        block = re.sub(rf"^{re.escape(key)}:.*$", f"{key}: {value}", block, flags=re.M)
-    else:
-        block += f"\n{key}: {value}"
-    return f"---\n{block}\n---\n" + text[m.end():]
-
-
 def as_list(v) -> list:
     if v is None or v == "":
         return []
@@ -227,7 +236,7 @@ def vault_root(required: bool = True) -> Path | None:
 
 
 def registry_dir(vault: Path) -> Path:
-    """Eine JSON-Datei pro Projekt: zwei Geraete, die gleichzeitig Projekte anlegen, kollidieren nicht."""
+    """Eine JSON-Datei pro Projekt: zwei Geräte, die gleichzeitig Projekte anlegen, kollidieren nicht."""
     return vault / SYSTEM_DIR / "projekte"
 
 
@@ -239,7 +248,7 @@ def load_registry(vault: Path) -> dict:
             try:
                 projects[p.stem] = json.loads(read_text(p) or "{}")
             except json.JSONDecodeError:
-                print(f"code-brain: {p} ist kein gueltiges JSON - uebersprungen", file=sys.stderr)
+                print(f"code-brain: {p} ist kein gültiges JSON - übersprungen", file=sys.stderr)
     return {"projects": projects}
 
 
@@ -266,13 +275,8 @@ def git_info(cwd: Path) -> dict:
 
 
 def detect_project(vault: Path, cwd: Path) -> tuple[str | None, dict, str]:
-    """(slug, eintrag, wie) - zuerst über Git-Remote, dann über den längsten passenden Pfad."""
+    """(slug, eintrag, wie) - zuerst über den längsten passenden Pfad, dann über den Git-Remote."""
     reg = load_registry(vault)
-    gi = git_info(cwd)
-    if gi["remote"]:
-        for slug, p in reg["projects"].items():
-            if gi["remote"] in [norm_remote(r) for r in as_list(p.get("remotes"))]:
-                return slug, p, f"Git-Remote {gi['remote']}"
     here = norm_path(cwd)
     best, best_len = None, -1
     for slug, p in reg["projects"].items():
@@ -282,6 +286,11 @@ def detect_project(vault: Path, cwd: Path) -> tuple[str | None, dict, str]:
                 best, best_len = slug, len(np_)
     if best:
         return best, reg["projects"][best], "Ordner"
+    gi = git_info(cwd)
+    if gi["remote"]:
+        for slug, p in reg["projects"].items():
+            if gi["remote"] in [norm_remote(r) for r in as_list(p.get("remotes"))]:
+                return slug, p, f"Git-Remote {gi['remote']}"
     return None, {}, ""
 
 
@@ -298,14 +307,12 @@ def render_template(template: str, **values) -> str:
     return text
 
 
-# --------------------------------------------------------------------------- Notizen einsammeln
+# --------------------------------------------------------------------------- Notizen
 
-def iter_notes(base: Path, include_archive: bool = False):
+def iter_notes(base: Path):
     for p in sorted(base.rglob("*.md")):
         rel = p.relative_to(base).as_posix()
         if "/." in "/" + rel or rel.startswith("."):
-            continue
-        if not include_archive and (rel.startswith("archiv/") or "/archiv/" in rel):
             continue
         yield p
 
@@ -319,10 +326,6 @@ def title_of(p: Path, body: str) -> str:
     return m.group(1).strip() if m else p.stem
 
 
-def open_todos(text: str) -> list[str]:
-    return [l.strip() for l in text.splitlines() if re.match(r"^\s*[-*] \[ \]", l)]
-
-
 COMMENT_RE = re.compile(r"%%.*?%%", re.S)
 
 
@@ -331,77 +334,38 @@ def strip_comments(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", COMMENT_RE.sub("", text)).strip()
 
 
-def section(body: str, heading_pattern: str) -> str:
-    """Inhalt unter der ersten ##-Überschrift, die auf das Muster passt (ohne Kommentare)."""
-    lines = strip_comments(body).splitlines()
-    out, inside = [], False
-    for line in lines:
-        if re.match(r"^##\s", line):
-            if inside:
-                break
-            inside = bool(re.search(heading_pattern, line, re.I))
-            continue
-        if inside:
-            out.append(line)
-    return "\n".join(out).strip()
+def note_body(p: Path) -> str:
+    """Inhalt ohne Frontmatter, Kommentare und erste Überschrift."""
+    _, body = note_meta(p)
+    return re.sub(r"^#\s.*\n?", "", strip_comments(body), count=1).strip()
 
 
-# --------------------------------------------------------------------------- Index
-
-def build_index(vault: Path, slug: str) -> str:
-    base = project_dir(vault, slug)
-    groups: dict[str, list[str]] = {"features": [], "entscheidungen": [], "wissen": []}
-    for sub in groups:
-        d = base / sub
-        if not d.is_dir():
-            continue
-        for p in sorted(d.glob("*.md")):
-            meta, body = note_meta(p)
-            status = str(meta.get("status", "")).lower()
-            if sub == "features" and status and status not in ACTIVE_FEATURE:
-                continue
-            if sub == "entscheidungen" and status in DONE_STATUS:
-                continue
-            link = f"{PROJECTS_DIR}/{slug}/{sub}/{p.stem}"
-            summary = str(meta.get("summary", "")).strip() or "(keine summary)"
-            extra = f" `{status}`" if status and sub == "features" else ""
-            groups[sub].append(f"- [[{link}|{p.stem}]]{extra} - {summary}")
-    lines = [
-        "---", "type: index", f"project: {slug}", f"updated: {today()}",
-        "summary: Automatisch erzeugt - nicht von Hand bearbeiten", "---", "",
-        f"# Index {slug}", "",
-        "> [!info] Wird von code-brain bei jedem Session-Start und Stop neu erzeugt.", "",
-    ]
-    names = {"features": "Features (aktiv)", "entscheidungen": "Entscheidungen (gültig)", "wissen": "Wissen"}
-    for sub, entries in groups.items():
-        lines.append(f"## {names[sub]}")
-        lines.extend(entries or ["- (noch nichts)"])
-        lines.append("")
-    return "\n".join(lines)
+def demote(text: str) -> str:
+    """## -> ### usw., damit Notizinhalt unter eine ##-Überschrift des Kontexts passt."""
+    return re.sub(r"^(#{2,5})\s", r"#\1 ", text, flags=re.M)
 
 
-def write_index(vault: Path, slug: str) -> None:
-    base = project_dir(vault, slug)
-    if not base.is_dir():
-        return
-    new = build_index(vault, slug)
-    old = read_text(base / "Index.md")
-    # Datum allein ist keine Änderung - sonst gäbe es täglich einen leeren Commit.
-    strip = lambda t: re.sub(r"^updated:.*$", "", t, flags=re.M)  # noqa: E731
-    if strip(old) != strip(new):
-        write_text(base / "Index.md", new)
+def pakete(base: Path, active_only: bool = True) -> list[tuple[Path, dict]]:
+    d = base / PAKETE_DIR
+    out = []
+    for p in sorted(d.glob("*.md")) if d.is_dir() else []:
+        meta, _ = note_meta(p)
+        if not active_only or str(meta.get("status", "")).lower() in ACTIVE_STATUS:
+            out.append((p, meta))
+    return out
+
+
+def wissen_names(d: Path) -> list[str]:
+    return [p.stem for p in sorted(d.glob("*.md"))] if d.is_dir() else []
 
 
 # --------------------------------------------------------------------------- Kontext
 
 CORE_RULES = """\
-**So arbeitest du mit code-brain (Kurzfassung, Details im Skill `code-brain`):**
-- Halte den Vault während der Arbeit laufend aktuell - nach jedem sinnvollen Schritt, nicht erst am Ende. Schreib jedes Update so, als wäre es die letzte Übergabe.
-- `Stand.md` wird überschrieben (Ist-Stand, nächster Schritt), nicht verlängert. Todos als Checkboxen in `Todos.md` oder der Feature-Notiz.
-- Entscheidung = eigene Notiz in `entscheidungen/`; Überholtes auf `status: ersetzt`/`verworfen` setzen (wandert automatisch ins Archiv).
-- Jede Notiz braucht Frontmatter mit `summary:` (eine Zeile) - daraus entsteht der Index.
-- Neues Wissen (Stolperstellen, Befehle, Architektur) nach `wissen/`, kurzer Verlauf nach `sessions/JJJJ-MM-TT.md`.
-- Details nicht raten: Index-Link öffnen oder `{cmd} search "<begriff>"` (auch `--archiv`)."""
+**code-brain - so pflegst du das Memory (Details im Skill `code-brain`):**
+- Jede Information an genau einem Ort: was dauerhaft gilt und was verworfen ist → `Projekt.md`; was läuft und was kommt → `Arbeitsstand.md`; alles zu einem Feature/Bug (Ziel, Todos, Festgelegt, Ergebnis) → `arbeitspakete/<nr-name>.md`; wie etwas geht → `wissen/` (ohne Projekt: `global/wissen/`).
+- Sofort eintragen, wenn der Nutzer etwas entscheidet, ändert oder streicht. Aufgabenstart: erst `{cmd} search "<begriffe>"`, Treffer lesen, dann Arbeitspaket + Arbeitsstand. Aufgabenende: Ergebnis + Arbeitsstand.
+- Unwichtiges löschen statt sammeln, nichts doppelt. Frontmatter: `type`, `summary`, `stichworte`, `updated`."""
 
 
 def clip(text: str, limit: int, pointer: str) -> str:
@@ -416,116 +380,76 @@ def cli_cmd() -> str:
     return f'python "{Path(__file__).resolve().as_posix()}"'
 
 
-def build_context(vault: Path, cwd: Path, sync_note: str = "") -> str:
+def wissen_part(vault: Path, base: Path | None) -> str:
+    lines = []
+    if base:
+        names = wissen_names(base / WISSEN_DIR)
+        if names:
+            lines.append("- Projekt: " + ", ".join(names))
+    names = wissen_names(vault / GLOBAL_DIR / WISSEN_DIR)
+    if names:
+        lines.append("- Global: " + ", ".join(names))
+    if not lines:
+        return ""
+    return ("## Wissen (nur Themen - bei Bezug Datei öffnen oder `search`)\n" + "\n".join(lines))
+
+
+def build_context(vault: Path, cwd: Path, notes: list[str] | None = None) -> str:
     slug, entry, how = detect_project(vault, cwd)
     cmd = cli_cmd()
     parts: list[str] = []
-    if sync_note:
-        parts.append(f"> [!warning] Sync\n> {sync_note}")
-    _, glob_body = parse_frontmatter(read_text(vault / "global" / "Regeln.md"))
-    glob_body = re.sub(r"^#\s.*\n?", "", strip_comments(glob_body), count=1).strip()
-    # Reihenfolge = Wichtigkeit: wird es zu lang, wird hinten gekürzt (Index, Verlauf), nie die Regeln.
-    glob_part = "## Globale Regeln\n" + clip(glob_body, 2000, "global/Regeln.md") if glob_body else ""
+    for n in notes or []:
+        parts.append(f"> [!warning] code-brain\n> {n}")
+    rules = note_body(vault / GLOBAL_DIR / RULES_FILE)
+    rules_part = ("## Arbeitsregeln\n" + clip(demote(rules), MAX_RULES, f"{GLOBAL_DIR}/{RULES_FILE}")
+                  if rules else "")
 
     if not slug and is_generic_dir(cwd):
-        parts.append(
-            f"# code-brain: allgemeiner Ordner (`{cwd}`) - kein Projekt-Memory\n"
-            "Hier wird nichts dokumentiert. Für Projektarbeit die Session im Projektordner starten."
-        )
+        parts.append(f"# code-brain: allgemeiner Ordner (`{cwd}`) - kein Projekt\n"
+                     f"Projektunabhängiges Wissen gehört nach `{vault / GLOBAL_DIR / WISSEN_DIR}`. "
+                     f"Vorher suchen: `{cmd} search \"<begriffe>\"`.")
+        parts += [x for x in (rules_part, wissen_part(vault, None)) if x]
     elif not slug:
         reg = load_registry(vault)
-        listing = "\n".join(
-            f"- `{s}` - {p.get('name', s)}" for s, p in sorted(reg["projects"].items())
-        ) or "- (noch keine Projekte)"
+        listing = "\n".join(f"- `{s}` - {p.get('name', s)}" for s, p in sorted(reg["projects"].items())) \
+            or "- (noch keine Projekte)"
         parts.append(
             f"# code-brain: kein Projekt für diesen Ordner\n"
             f"Ordner: `{cwd}` - Vault: `{vault}`\n\n"
-            "Wenn in dieser Session an Code in diesem Ordner gearbeitet wird, lege das Projekt "
-            "an, sobald klar ist, worum es geht (ohne Rückfrage, außer der Name ist unklar):\n"
-            f'`{cmd} new --name "<Projektname>" --cwd "{cwd}"`\n'
-            "Gehört der Ordner zu einem bestehenden Projekt (z. B. anderer Klon/Ordner), stattdessen:\n"
-            f'`{cmd} link <slug> --cwd "{cwd}"`\n'
-            "Reine Fragen ohne Projektbezug (Rezepte, Allgemeinwissen) werden nicht dokumentiert.\n\n"
-            f"Bekannte Projekte:\n{listing}"
-        )
+            "Wird hier an Code gearbeitet, lege das Projekt an, sobald klar ist, worum es geht "
+            f'(ohne Rückfrage, außer der Name ist unklar): `{cmd} new --name "<Projektname>" --cwd "{cwd}"`\n'
+            f'Gehört der Ordner zu einem bestehenden Projekt: `{cmd} link <slug> --cwd "{cwd}"`\n'
+            f"Projektunabhängiges Wissen gehört nach `global/wissen/`.\n\nBekannte Projekte:\n{listing}")
+        parts += [x for x in (rules_part, wissen_part(vault, None)) if x]
     else:
         base = project_dir(vault, slug)
         rel = f"{PROJECTS_DIR}/{slug}"
-        parts.append(
-            f"# code-brain: Projekt {entry.get('name', slug)} (`{slug}`)\n"
-            f"Erkannt über: {how} - Projektordner: `{base}`\n"
-            f"Skript: `{cmd}`"
-        )
+        parts.append(f"# code-brain: Projekt {entry.get('name', slug)} (`{slug}`)\n"
+                     f"Erkannt über: {how} - Projektordner: `{base}`\nSkript: `{cmd}`")
         parts.append(CORE_RULES.format(cmd=cmd))
-        if glob_part:
-            parts.append(glob_part)
-            glob_part = ""
-        _, stand = parse_frontmatter(read_text(base / "Stand.md"))
-        stand = re.sub(r"^#\s.*\n?", "", strip_comments(stand), count=1).strip()
-        stand = re.sub(r"^(#{2,5})\s", r"#\1 ", stand, flags=re.M)     # unter "## Stand" einruecken
-        parts.append("## Stand\n" + clip(stand or "(leer)", STAND_MAX_CHARS, f"{rel}/Stand.md"))
-
-        # Verbote wirken zuverlässiger als "schau mal nach" - deshalb immer direkt im Kontext.
-        _, hub = parse_frontmatter(read_text(base / f"{slug}.md"))
-        dont = section(hub, r"nicht tun")
-        if re.sub(r"[-\s]", "", dont):
-            parts.append("## Nicht tun\n" + clip(dont, 1200, f"{rel}/{slug}.md"))
-
-        todos = open_todos(read_text(base / "Todos.md"))
-        for p in sorted((base / "features").glob("*.md")) if (base / "features").is_dir() else []:
-            meta, body = note_meta(p)
-            if str(meta.get("status", "")).lower() in ACTIVE_FEATURE:
-                todos += [f"{t}  _({p.stem})_" for t in open_todos(body)]
-        if todos:
-            shown = [t if len(t) <= 150 else t[:147] + "..." for t in todos[:20]]
-            more = f"\n- ... und {len(todos) - 20} weitere" if len(todos) > 20 else ""
-            parts.append("## Offene Todos\n" + "\n".join(shown) + more)
-
-        _, plan = parse_frontmatter(read_text(base / "Plan.md"))
-        nxt = section(plan, r"als n.chstes|next")
-        if re.sub(r"[-\s]", "", nxt):
-            parts.append("## Plan - als Nächstes\n" + clip(nxt, 1200, f"{rel}/Plan.md"))
-
-        _, idx = parse_frontmatter(read_text(base / "Index.md"))
-        idx_lines, heading, group = [], "", ""
-        wissen: list[str] = []
-        for l in idx.splitlines():
-            if l.startswith("## "):
-                heading, group = "#" + l, l[3:].lower()
-            elif l.startswith("- ") and "(noch nichts)" not in l:
-                # Im Kontext reicht der Name - der volle Pfad ergibt sich aus Ordner + Name.
-                short = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", l)
-                if group.startswith("wissen"):
-                    wissen.append(short[2:].split(" - ", 1)[0])   # Thema steht im Namen
-                    continue
-                if heading:
-                    idx_lines.append(heading)
-                    heading = ""
-                idx_lines.append(short if len(short) <= 160 else short[:157] + "...")
-        if wissen:
-            idx_lines.append("### Wissen\n- " + ", ".join(wissen))
-        if idx_lines:
-            parts.append(f"## Index (aktive Notizen, Dateien unter `{rel}/<ordner>/<Name>.md`)\n"
-                         + clip("\n".join(idx_lines), 3500, f"{rel}/Index.md"))
-
-        sess_dir = base / "sessions"
-        if sess_dir.is_dir():
-            sessions = sorted(sess_dir.glob("*.md"))
-            if sessions:
-                _, last = parse_frontmatter(read_text(sessions[-1]))
-                bullets = [re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", l)[:200]
-                           for l in last.splitlines() if l.startswith("- ")][-6:]
-                if bullets:
-                    parts.append(f"## Letzte Session ({sessions[-1].stem})\n" + "\n".join(bullets))
-
-    if glob_part:
-        parts.append(glob_part)
+        if rules_part:
+            parts.append(rules_part)
+        hub = note_body(base / HUB_FILE)
+        parts.append("## Projekt\n" + clip(demote(hub) or "(leer)", MAX_HUB, f"{rel}/{HUB_FILE}"))
+        stand = note_body(base / STAND_FILE)
+        parts.append("## Arbeitsstand\n" + clip(demote(stand) or "(leer)", MAX_STAND, f"{rel}/{STAND_FILE}"))
+        offen = []
+        for p, meta in pakete(base):
+            status = str(meta.get("status", "")) or "?"
+            summary = str(meta.get("summary", "")).strip()
+            line = f"- {p.stem} `{status}` - {summary}"
+            offen.append(line if len(line) <= 170 else line[:167] + "...")
+        if offen:
+            parts.append(f"## Offene Arbeitspakete (`{rel}/{PAKETE_DIR}/<Name>.md`)\n" + "\n".join(offen))
+        w = wissen_part(vault, base)
+        if w:
+            parts.append(w)
 
     out = "\n\n".join(parts)
     # Gemessen wird die JSON-kodierte Länge - so zählt Claude Code das 10.000-Zeichen-Limit.
     while len(json.dumps(out, ensure_ascii=False)) > CONTEXT_BUDGET + 300 and len(out) > 500:
         out = out[: int(len(out) * 0.9)].rsplit("\n", 1)[0]
-        out += "\n... (Kontext gekürzt - Rest NICHT geladen, im Vault lesen: Stand.md, Todos.md, Index.md)"
+        out += f"\n... (Kontext gekürzt - Rest im Vault lesen; `{cmd} check` zeigt, was zu lang ist)"
     return out
 
 
@@ -652,30 +576,34 @@ def sync_push(vault: Path, label: str = "") -> str:
     return "" if code == 0 else f"git push im Vault fehlgeschlagen: {out[:300]}"
 
 
-# --------------------------------------------------------------------------- Zustand für den Stop-Hook
+# --------------------------------------------------------------------------- Zustand je Session
+
+def state_dir(vault: Path) -> Path:
+    return vault / STATE_DIR / "sessions"
+
 
 def state_file(vault: Path, session_id: str) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_-]", "_", session_id or "unbekannt")
-    return vault / STATE_DIR / "sessions" / f"{safe}.json"
+    return state_dir(vault) / f"{safe}.json"
 
 
 def load_state(vault: Path, session_id: str) -> dict:
-    p = state_file(vault, session_id)
     try:
-        return json.loads(read_text(p) or "{}")
+        return json.loads(read_text(state_file(vault, session_id)) or "{}")
     except json.JSONDecodeError:
         return {}
 
 
 def save_state(vault: Path, session_id: str, state: dict) -> None:
-    write_text(state_file(vault, session_id), json.dumps(state, indent=1))
+    state["seen"] = now_ts()
+    write_text(state_file(vault, session_id), json.dumps(state, indent=1, ensure_ascii=False))
 
 
 def prune_states(vault: Path, days: int = 14) -> None:
-    d = vault / STATE_DIR / "sessions"
+    d = state_dir(vault)
     if not d.is_dir():
         return
-    limit = dt.datetime.now().timestamp() - days * 86400
+    limit = now_ts() - days * 86400
     for p in d.glob("*.json"):
         try:
             if p.stat().st_mtime < limit:
@@ -684,28 +612,9 @@ def prune_states(vault: Path, days: int = 14) -> None:
             pass
 
 
-def code_fingerprint(cwd: Path) -> str:
-    """Ändert sich bei Commits und bei jeder Dateiänderung im Arbeitsbaum."""
-    roots: list[Path] = []
-    gi = git_info(cwd)
-    if gi["toplevel"]:
-        roots = [Path(gi["toplevel"])]
-    else:
-        # Sammelordner ohne eigenes Repo (z. B. Repo + Worktrees nebeneinander)
-        try:
-            roots = [p for p in sorted(cwd.iterdir()) if (p / ".git").exists()][:12]
-        except OSError:
-            roots = []
-    h = hashlib.sha1()
-    for r in roots:
-        for args in (["rev-parse", "HEAD"], ["status", "--porcelain"], ["diff", "--numstat", "HEAD"]):
-            _, out = run_git(args, r, timeout=8)
-            h.update(out.encode("utf-8", "replace"))
-    return h.hexdigest() if roots else ""
-
-
 def vault_fingerprint(vault: Path, slug: str | None) -> str:
-    targets = [vault / "global"]
+    """Ändert sich bei jeder Notiz-Änderung in global/ und im Projekt."""
+    targets = [vault / GLOBAL_DIR]
     if slug:
         targets.append(project_dir(vault, slug))
     h = hashlib.sha1()
@@ -713,8 +622,6 @@ def vault_fingerprint(vault: Path, slug: str | None) -> str:
         if not t.is_dir():
             continue
         for p in sorted(t.rglob("*.md")):
-            if p.name == "Index.md":
-                continue
             try:
                 st = p.stat()
                 h.update(f"{p}:{st.st_mtime_ns}:{st.st_size}".encode())
@@ -723,25 +630,31 @@ def vault_fingerprint(vault: Path, slug: str | None) -> str:
     return h.hexdigest()
 
 
-def count_prompts(transcript: str) -> int:
-    """Echte Nutzer-Nachrichten im Transkript (Tool-Ergebnisse zählen nicht)."""
-    if not transcript or not Path(transcript).is_file():
-        return 0
-    n = 0
-    try:
-        with open(transcript, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if '"type":"user"' not in line.replace(" ", ""):
-                    continue
-                if "tool_use_id" in line or '"isMeta":true' in line.replace(" ", ""):
-                    continue
-                n += 1
-    except OSError:
-        return 0
-    return n
+def stand_mark(vault: Path, slug: str | None) -> float:
+    return mtime(project_dir(vault, slug) / STAND_FILE) if slug else 0.0
 
 
-# --------------------------------------------------------------------------- Pflege (check / archive)
+def stale_tasks(vault: Path, slug: str, own_sid: str) -> list[dict]:
+    """Offene Aufgaben anderer Sessions im selben Projekt, die beendet oder lange still sind."""
+    found = []
+    d = state_dir(vault)
+    own = state_file(vault, own_sid).name
+    for p in sorted(d.glob("*.json")) if d.is_dir() else []:
+        if p.name == own:
+            continue
+        try:
+            st = json.loads(read_text(p) or "{}")
+        except json.JSONDecodeError:
+            continue
+        task = st.get("task") or {}
+        if st.get("slug") != slug or not task.get("open"):
+            continue
+        if st.get("ended") or now_ts() - float(st.get("seen", 0)) > STALE_TASK_HOURS * 3600:
+            found.append({"file": p, "state": st, "task": task})
+    return found
+
+
+# --------------------------------------------------------------------------- Pflege (check)
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 
@@ -757,99 +670,65 @@ def all_note_names(vault: Path) -> tuple[set, set]:
     return stems, paths
 
 
-def archive_note(vault: Path, slug: str, note: Path) -> Path:
+def check_note(vault: Path, p: Path, stems: set, paths: set) -> list[str]:
+    rel = p.relative_to(vault).as_posix()
+    meta, body = note_meta(p)
+    issues = []
+    missing = [k for k in ("type", "summary", "updated") if not meta.get(k)]
+    if f"/{PAKETE_DIR}/" in rel and not meta.get("status"):
+        missing.append("status")
+    if missing:
+        issues.append(f"{rel}: Frontmatter fehlt {', '.join(missing)}")
+    if (f"/{PAKETE_DIR}/" in rel or f"/{WISSEN_DIR}/" in rel or rel.startswith(f"{GLOBAL_DIR}/{WISSEN_DIR}/")) \
+            and not meta.get("stichworte"):
+        issues.append(f"{rel}: `stichworte` fehlen (Suchbegriffe)")
+    for target in WIKILINK_RE.findall(strip_comments(body)):
+        t = target.strip().lower().removesuffix(".md")
+        if t not in stems and t not in paths:
+            issues.append(f"{rel}: toter Link [[{target.strip()}]]")
+    return issues
+
+
+def check_project(vault: Path, slug: str) -> list[str]:
     base = project_dir(vault, slug)
-    rel = note.relative_to(base)
-    target = base / "archiv" / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    text = read_text(note)
-    text = set_frontmatter_field(text, "archiviert", today())
-    write_text(target, text)
-    note.unlink()
-    # Pfad-Links auf die alte Stelle umbiegen; reine Namens-Links löst Obsidian weiter auf.
-    old_link = f"{PROJECTS_DIR}/{slug}/{rel.as_posix()[:-3]}"
-    new_link = f"{PROJECTS_DIR}/{slug}/archiv/{rel.as_posix()[:-3]}"
-    for p in iter_notes(base, include_archive=True):
-        t = read_text(p)
-        if old_link in t:
-            write_text(p, t.replace(old_link, new_link))
-    return target
-
-
-def move_done_todos(vault: Path, slug: str, fix: bool) -> list[str]:
-    base = project_dir(vault, slug)
-    todo = base / "Todos.md"
-    text = read_text(todo)
-    if not text:
-        return []
-    limit = dt.date.today() - dt.timedelta(days=ARCHIVE_AFTER_DAYS)
-    keep, moved = [], []
-    for line in text.splitlines():
-        m = re.match(r"^\s*[-*] \[x\].*?(\d{4}-\d{2}-\d{2})", line, re.I)
-        if m and dt.date.fromisoformat(m.group(1)) < limit:
-            moved.append(line.strip())
-        else:
-            keep.append(line)
-    if moved and fix:
-        write_text(todo, "\n".join(keep) + "\n")
-        arch = base / "archiv" / "Todos-erledigt.md"
-        old = read_text(arch) or ("---\ntype: archiv\nsummary: Erledigte Todos, aus Todos.md verschoben\n---\n\n"
-                                  "# Erledigte Todos\n")
-        write_text(arch, old.rstrip("\n") + "\n" + "\n".join(moved) + "\n")
-    return moved
-
-
-def check_project(vault: Path, slug: str, fix: bool) -> list[str]:
-    base = project_dir(vault, slug)
-    issues: list[str] = []
     if not base.is_dir():
         return [f"Projektordner fehlt: {base}"]
     stems, paths = all_note_names(vault)
-    limit = dt.date.today() - dt.timedelta(days=ARCHIVE_AFTER_DAYS)
-
+    issues: list[str] = []
+    legacy = [n for n in LEGACY if (base / n).exists()]
+    if legacy:
+        issues.append(f"alte Struktur noch vorhanden: {', '.join(legacy)} - in Projekt.md, Arbeitsstand.md, "
+                      "arbeitspakete/ und wissen/ überführen, dann löschen")
+    for name in (HUB_FILE, STAND_FILE):
+        if not (base / name).exists():
+            issues.append(f"{name} fehlt")
     for p in iter_notes(base):
-        rel = p.relative_to(base).as_posix()
-        meta, body = note_meta(p)
-        if rel.startswith("sessions/") or p.name == "Index.md":
-            pass
-        else:
-            missing = [k for k in ("type", "summary", "updated") if not meta.get(k)]
-            if missing:
-                issues.append(f"{rel}: Frontmatter fehlt {', '.join(missing)}")
-        for target in WIKILINK_RE.findall(body):
-            t = target.strip().lower().removesuffix(".md")
-            if t not in stems and t not in paths:
-                issues.append(f"{rel}: toter Link [[{target.strip()}]]")
-        status = str(meta.get("status", "")).lower()
-        sub = rel.split("/", 1)[0]
-        upd = str(meta.get("updated", ""))
-        old = bool(re.match(r"\d{4}-\d{2}-\d{2}$", upd)) and dt.date.fromisoformat(upd) < limit
-        if sub == "entscheidungen" and status in {"ersetzt", "verworfen"}:
-            if fix:
-                archive_note(vault, slug, p)
-                issues.append(f"{rel}: archiviert (status {status})")
-            else:
-                issues.append(f"{rel}: status {status} -> archivieren")
-        elif sub == "features" and status in {"fertig", "verworfen"} and (old or not upd):
-            if fix:
-                archive_note(vault, slug, p)
-                issues.append(f"{rel}: archiviert (Feature {status})")
-            else:
-                issues.append(f"{rel}: Feature {status} seit >{ARCHIVE_AFTER_DAYS} Tagen -> archivieren")
+        issues += check_note(vault, p, stems, paths)
+    for name, limit in ((HUB_FILE, MAX_HUB), (STAND_FILE, MAX_STAND)):
+        n = len(demote(note_body(base / name)))
+        if n > limit:
+            issues.append(f"{name} hat {n} Zeichen (Startkontext lädt {limit}) - Überholtes löschen, kürzen")
+    return issues
 
-    _, stand = parse_frontmatter(read_text(base / "Stand.md"))
-    if len(stand) > STAND_MAX_CHARS:
-        issues.append(f"Stand.md hat {len(stand)} Zeichen (Ziel < {STAND_MAX_CHARS}) - kürzen")
-    moved = move_done_todos(vault, slug, fix)
-    if moved:
-        issues.append(f"Todos.md: {len(moved)} erledigte Todos {'archiviert' if fix else 'älter als ' + str(ARCHIVE_AFTER_DAYS) + ' Tage'}")
+
+def check_global(vault: Path) -> list[str]:
+    stems, paths = all_note_names(vault)
+    issues = []
+    g = vault / GLOBAL_DIR
+    if (g / "Regeln.md").exists():
+        issues.append(f"{GLOBAL_DIR}/Regeln.md ist die alte Datei - Inhalt nach {RULES_FILE} überführen, dann löschen")
+    for p in iter_notes(g) if g.is_dir() else []:
+        issues += check_note(vault, p, stems, paths)
+    n = len(demote(note_body(g / RULES_FILE)))
+    if n > MAX_RULES:
+        issues.append(f"{GLOBAL_DIR}/{RULES_FILE} hat {n} Zeichen (Startkontext lädt {MAX_RULES}) - kürzen")
     return issues
 
 
 # --------------------------------------------------------------------------- Suche
 
 STOP = set("""der die das und oder nicht ein eine einer eines einem einen ist sind war wird wurde werden
-mit für für von zu im in am an auf aus bei nach über über unter wie was wer wo warum wieso weshalb dass
+mit für von zu im in am an auf aus bei nach über unter wie was wer wo warum wieso weshalb dass
 es er sie wir ihr ich du man auch noch nur schon so dann denn als wenn aber doch mal hat haben hatte
 the a an and or not is are was were be to of in on at for with from by as it this that what why how
 """.split())
@@ -859,24 +738,24 @@ def tokens(text: str) -> list[str]:
     return [t for t in re.findall(r"[\wäöüß]+", text.lower()) if len(t) > 1 and t not in STOP]
 
 
-def search(vault: Path, query: str, slug: str | None, all_projects: bool,
-           include_archive: bool, limit: int) -> list[dict]:
+def search(vault: Path, query: str, slug: str | None, all_projects: bool, limit: int) -> list[dict]:
     q = tokens(query)
     if not q:
         return []
-    bases = [vault] if all_projects or not slug else [project_dir(vault, slug), vault / "global"]
+    bases = [vault] if all_projects or not slug else [project_dir(vault, slug), vault / GLOBAL_DIR]
     results = []
     for base in bases:
         if not base.is_dir():
             continue
-        for p in iter_notes(base, include_archive=include_archive):
+        for p in iter_notes(base):
             rel = p.relative_to(vault).as_posix()
-            if rel.startswith(SYSTEM_DIR + "/") or p.name == "Index.md":
+            if rel.startswith(SYSTEM_DIR + "/") or rel == "README.md":
                 continue
             meta, body = note_meta(p)
             title = title_of(p, body) + " " + p.stem
             head = " ".join(re.findall(r"^#+\s+(.+)$", body, re.M))
-            meta_txt = " ".join(str(v) for k, v in meta.items() if k in ("summary", "tags", "bereich", "status"))
+            meta_txt = " ".join(" ".join(map(str, as_list(v))) for k, v in meta.items()
+                                if k in ("summary", "stichworte", "tags", "issue", "branch", "pr", "status"))
             fields = {"title": (tokens(title), 4.0), "meta": (tokens(meta_txt), 3.0),
                       "head": (tokens(head), 2.0), "body": (tokens(body), 1.0)}
             score, hit_terms = 0.0, set()
@@ -889,19 +768,12 @@ def search(vault: Path, query: str, slug: str | None, all_projects: bool,
             if not score:
                 continue
             score *= (len(hit_terms) / len(q)) ** 1.5        # alle Begriffe getroffen > einer oft
-            status = str(meta.get("status", "")).lower()
-            if status in DONE_STATUS or "/archiv/" in "/" + rel:
-                score *= 0.6
-            upd = str(meta.get("updated", ""))
-            if re.match(r"\d{4}-\d{2}-\d{2}$", upd):
-                age = (dt.date.today() - dt.date.fromisoformat(upd)).days
-                score *= 1.25 if age <= 30 else (1.0 if age <= 180 else 0.85)
             snippet = ""
             for line in body.splitlines():
                 if any(t in line.lower() for t in q):
                     snippet = line.strip()[:160]
                     break
-            results.append({"score": round(score, 2), "path": rel, "status": status,
+            results.append({"score": round(score, 2), "path": rel, "status": str(meta.get("status", "")),
                             "summary": str(meta.get("summary", "")), "snippet": snippet})
     results.sort(key=lambda r: -r["score"])
     return results[:limit]
@@ -911,7 +783,7 @@ def search(vault: Path, query: str, slug: str | None, all_projects: bool,
 
 def gh_credential_helper(user: str) -> str:
     """Git-Credential-Helper, der das Token eines bestimmten gh-Kontos liefert.
-    So nutzt nur der Vault dieses Konto - das global aktive gh-Konto bleibt unberuehrt."""
+    So nutzt nur der Vault dieses Konto - das global aktive gh-Konto bleibt unberührt."""
     gh = (shutil.which("gh") or "gh").replace("\\", "/")
     return (f'!f() {{ test "$1" = get || exit 0; echo username={user}; '
             f'echo password=$("{gh}" auth token --user {user}); }}; f')
@@ -945,11 +817,11 @@ def cmd_init(a) -> None:
         run_git(["config", "--replace-all", "credential.helper", ""], vault)
         run_git(["config", "--add", "credential.helper", gh_credential_helper(a.gh_user)], vault)
         # Die globale github.com-Regel (gh mit aktivem Konto) hat Vorrang vor credential.helper -
-        # deshalb fuer dieses Repo ebenfalls ueberschreiben.
+        # deshalb für dieses Repo ebenfalls überschreiben.
         run_git(["config", "--replace-all", "credential.https://github.com.helper", ""], vault)
         run_git(["config", "--add", "credential.https://github.com.helper", gh_credential_helper(a.gh_user)], vault)
-    for d in (SYSTEM_DIR, PROJECTS_DIR, "global"):
-        (vault / d).mkdir(exist_ok=True)
+    for d in (SYSTEM_DIR, PROJECTS_DIR, f"{GLOBAL_DIR}/{WISSEN_DIR}"):
+        (vault / d).mkdir(parents=True, exist_ok=True)
     gi = vault / ".gitignore"
     wanted = [f"{STATE_DIR}/", ".obsidian/workspace*.json", ".obsidian/cache", ".trash/"]
     have = read_text(gi).splitlines()
@@ -961,14 +833,14 @@ def cmd_init(a) -> None:
     have = read_text(ga).splitlines()
     wanted = ["* text=auto eol=lf", "*.md merge=union"]
     write_text(ga, "\n".join(have + [w for w in wanted if w not in have]).strip() + "\n")
-    for keep in (vault / PROJECTS_DIR, registry_dir(vault)):
+    for keep in (vault / PROJECTS_DIR, registry_dir(vault), vault / GLOBAL_DIR / WISSEN_DIR):
         keep.mkdir(parents=True, exist_ok=True)
         if not any(keep.iterdir()):
             write_text(keep / ".gitkeep", "")
     if not (vault / "README.md").exists():
         write_text(vault / "README.md", render_template("vault-README.md", date=today()))
-    if not (vault / "global" / "Regeln.md").exists():
-        write_text(vault / "global" / "Regeln.md", render_template("Regeln.md", date=today()))
+    if not (vault / GLOBAL_DIR / RULES_FILE).exists():
+        write_text(vault / GLOBAL_DIR / RULES_FILE, render_template("Arbeitsregeln.md", date=today()))
     cfg = load_config()
     cfg["vault"] = str(vault)
     write_text(config_path(), json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
@@ -1010,13 +882,13 @@ def cmd_new(a) -> None:
     base = project_dir(vault, slug)
     values = dict(name=a.name, slug=slug, date=today(), remote=gi["remote"] or "-",
                   path=str(cwd).replace("\\", "/"))
-    files = {f"{slug}.md": "Projekt.md", "Stand.md": "Stand.md", "Plan.md": "Plan.md", "Todos.md": "Todos.md"}
-    for target, tpl in files.items():
+    for target, tpl in ((HUB_FILE, "Projekt.md"), (STAND_FILE, "Arbeitsstand.md")):
         if not (base / target).exists():
             write_text(base / target, render_template(tpl, **values))
-    for d in NOTE_DIRS:
+    for d in (PAKETE_DIR, WISSEN_DIR):
         (base / d).mkdir(parents=True, exist_ok=True)
-    write_index(vault, slug)
+        if not any((base / d).iterdir()):
+            write_text(base / d / ".gitkeep", "")
     print(f"Projekt angelegt: {slug}\nOrdner: {base}\nRemote: {gi['remote'] or '-'}")
 
 
@@ -1041,28 +913,12 @@ def cmd_context(a) -> None:
     print(build_context(vault, Path(a.cwd or os.getcwd())))
 
 
-def resolve_slug(vault: Path, given: str | None, cwd: str | None = None) -> str:
-    if given:
-        return given
-    slug, _, _ = detect_project(vault, Path(cwd or os.getcwd()))
-    if not slug:
-        sys.exit("Kein Projekt für diesen Ordner - Slug angeben.")
-    return slug
-
-
-def cmd_index(a) -> None:
-    vault = vault_root()
-    slug = resolve_slug(vault, a.slug)
-    write_index(vault, slug)
-    print(f"Index aktualisiert: {project_dir(vault, slug) / 'Index.md'}")
-
-
 def cmd_search(a) -> None:
     vault = vault_root()
     slug, _, _ = detect_project(vault, Path(os.getcwd()))
-    res = search(vault, a.query, slug, a.all, a.archiv, a.n)
+    res = search(vault, a.query, slug, a.all, a.n)
     if not res:
-        print("Keine Treffer." + ("" if a.archiv else " Tipp: --archiv oder --all"))
+        print("Keine Treffer." + ("" if a.all else " Tipp: --all sucht in allen Projekten"))
         return
     for r in res:
         status = f" [{r['status']}]" if r["status"] else ""
@@ -1075,32 +931,22 @@ def cmd_search(a) -> None:
 
 def cmd_check(a) -> None:
     vault = vault_root()
-    slugs = [a.slug] if a.slug else ([resolve_slug(vault, None)] if not a.all else
-                                     list(load_registry(vault)["projects"]))
+    if a.slug:
+        slugs = [a.slug]
+    elif a.all:
+        slugs = list(load_registry(vault)["projects"])
+    else:
+        slug, _, _ = detect_project(vault, Path(os.getcwd()))
+        slugs = [slug] if slug else []
     total = 0
-    for slug in slugs:
-        issues = check_project(vault, slug, a.fix)
-        if a.fix:
-            write_index(vault, slug)
-        print(f"## {slug}: {len(issues)} Punkte")
+    sections = [("global", check_global(vault))] + [(s, check_project(vault, s)) for s in slugs]
+    for name, issues in sections:
+        print(f"## {name}: {len(issues)} Punkte")
         for i in issues:
             print(f"- {i}")
         total += len(issues)
     if total == 0:
         print("Alles in Ordnung.")
-
-
-def cmd_archive(a) -> None:
-    vault = vault_root()
-    note = Path(a.file).resolve()
-    try:
-        rel = note.relative_to((vault / PROJECTS_DIR).resolve())
-    except ValueError:
-        sys.exit("Datei liegt nicht in einem Projektordner des Vaults.")
-    slug = rel.parts[0]
-    target = archive_note(vault, slug, note)
-    write_index(vault, slug)
-    print(f"Archiviert: {target}")
 
 
 def cmd_sync(a) -> None:
@@ -1110,6 +956,9 @@ def cmd_sync(a) -> None:
 
 
 # --------------------------------------------------------------------------- Hooks
+#
+# Grundsatz: Kein Hook erzwingt eine Extra-Runde. Hinweise gehen als additionalContext mit dem
+# nächsten Tool-Ergebnis oder der nächsten Nutzer-Nachricht mit; Stop und SessionEnd speichern nur.
 
 def hook_payload() -> dict:
     # Claude Code schickt UTF-8; unter Windows wäre sys.stdin cp1252 -> Umlaute in Pfaden kaputt.
@@ -1120,6 +969,17 @@ def hook_payload() -> dict:
         return {}
 
 
+def emit(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
+    sys.stdout.flush()
+
+
+def emit_context(event: str, texts: list[str]) -> None:
+    texts = [t for t in texts if t]
+    if texts:
+        emit({"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n\n".join(texts)}})
+
+
 def hook_session_start(payload: dict) -> None:
     vault = vault_root(required=False)
     if not vault:
@@ -1127,197 +987,293 @@ def hook_session_start(payload: dict) -> None:
                "Frage den Nutzer einmal nach dem privaten Git-Repo für das Memory und dem lokalen "
                "Vault-Ordner, dann richte es ein (Anleitung im Skill `code-brain`, Abschnitt Einrichtung):\n"
                f'`{cli_cmd()} init --vault "<ordner>" --remote "<git-url>"`')
+        emit_context("SessionStart", [ctx])
+        return
+    cwd = Path(payload.get("cwd") or os.getcwd())
+    source = payload.get("source", "startup") or "startup"
+    notes = []
+    if source in ("startup", "clear"):
+        sync = sync_pull(vault)
+        if sync:
+            notes.append(sync)
+    earlier = read_text(last_sync_file(vault)).strip()
+    if earlier:
+        notes.append(f"Letzter Sync: {earlier}")
+    slug, _, _ = detect_project(vault, cwd)
+    sid = payload.get("session_id", "")
+    st = load_state(vault, sid)
+    if slug:
+        for t in stale_tasks(vault, slug, sid):
+            when = dt.datetime.fromtimestamp(float(t["task"].get("started", 0))).strftime("%Y-%m-%d %H:%M")
+            notes.append(f"Die Aufgabe „{t['task'].get('title', '?')}“ (gestartet {when}) wurde nicht abgeschlossen. "
+                         "Prüfe `Arbeitsstand.md` und das Arbeitspaket gegen Git (Branch, Commits, PR) und trag "
+                         "den echten Stand ein.")
+            t["state"]["task"]["open"] = False          # nur einmal melden
+            write_text(t["file"], json.dumps(t["state"], indent=1, ensure_ascii=False))
+    if source == "compact":
+        notes.append("Das Gespräch wurde eben komprimiert. Prüfe, ob `Arbeitsstand.md` und das Arbeitspaket "
+                     "alles aus der Zusammenfassung enthalten (Entscheidungen, Stand, nächste Schritte), und trag "
+                     "Fehlendes nach.")
+    if source in ("startup", "clear") or not st:
+        st = {"slug": slug, "vault_fp": vault_fingerprint(vault, slug), "prompts": 0, "doc_at": 0,
+              "awaiting_stop": False, "task": {}, "stand_mark": stand_mark(vault, slug)}
     else:
-        cwd = Path(payload.get("cwd") or os.getcwd())
-        note = sync_pull(vault) if payload.get("source", "startup") in ("startup", "clear", "") else ""
-        slug, _, _ = detect_project(vault, cwd)
-        if slug:
-            try:
-                check_project(vault, slug, fix=True)   # Veraltetes still ins Archiv
-                write_index(vault, slug)
-            except Exception as e:  # noqa: BLE001 - Pflege darf den Start nie verhindern
-                print(f"code-brain Pflege: {e}", file=sys.stderr)
-        sid = payload.get("session_id", "")
-        st = load_state(vault, sid)
-        st.update({"slug": slug, "code_fp": code_fingerprint(cwd),
-                   "vault_fp": vault_fingerprint(vault, slug),
-                   "doc_prompts": count_prompts(payload.get("transcript_path", ""))})
-        save_state(vault, sid, st)
-        prune_states(vault)
-        earlier = read_text(last_sync_file(vault)).strip()
-        note = " ".join(x for x in (note, f"Letzter Sync: {earlier}" if earlier else "") if x)
-        ctx = build_context(vault, cwd, note)
-    emit({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}})
+        st.update({"slug": slug, "ended": False})
+    save_state(vault, sid, st)
+    prune_states(vault)
+    emit_context("SessionStart", [build_context(vault, cwd, notes)])
 
 
-def emit(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj, ensure_ascii=False))
-    sys.stdout.flush()
+def note_vault_activity(vault: Path, slug: str | None, st: dict) -> None:
+    """Vault geändert seit dem letzten Blick -> Zähler für die Erinnerung zurücksetzen."""
+    fp = vault_fingerprint(vault, slug)
+    if fp != st.get("vault_fp"):
+        st["vault_fp"] = fp
+        st["doc_at"] = st.get("prompts", 0)
+        st["dirty"] = True
 
 
-def block(reason: str) -> None:
-    emit({"decision": "block", "reason": reason})
-
-
-def hook_stop(payload: dict) -> None:
+def hook_user_prompt(payload: dict) -> None:
     vault = vault_root(required=False)
     if not vault:
         return
     cwd = Path(payload.get("cwd") or os.getcwd())
     sid = payload.get("session_id", "")
-    active = bool(payload.get("stop_hook_active"))
     slug, _, _ = detect_project(vault, cwd)
     st = load_state(vault, sid)
-    code_fp = code_fingerprint(cwd)
-    vault_fp = vault_fingerprint(vault, slug)
-    prompts = count_prompts(payload.get("transcript_path", ""))
-
-    def settle() -> None:
-        if slug:
-            auto_session_line(vault, slug)
-        st.update({"slug": slug, "code_fp": code_fp, "vault_fp": vault_fingerprint(vault, slug),
-                   "doc_prompts": prompts})
-        save_state(vault, sid, st)
-        if slug:
-            write_index(vault, slug)
-        msg = sync_push(vault, slug or "global")
-        remember_sync(vault, msg)
-        if msg.startswith("Commit gestoppt") and not active:
-            block(f"code-brain: {msg}")
-
-    if not slug:
-        if st.get("vault_fp") != vault_fp:
-            settle()          # Vault wurde trotzdem geändert (z. B. globale Regeln)
-            return
-        start_fp = st.get("code_fp")
-        if (not active and start_fp and code_fp and code_fp != start_fp
-                and not st.get("asked_new") and not is_generic_dir(cwd)):
-            st["asked_new"] = True       # nur einmal pro Session fragen
-            save_state(vault, sid, st)
-            block("code-brain: In diesem Ordner wird Code geändert, aber es gibt noch kein Projekt im Vault. "
-                  f'Lege es jetzt an (`{cli_cmd()} new --name "<Projektname>" --cwd "{cwd}"`) oder ordne den '
-                  "Ordner mit `link <slug>` einem bestehenden Projekt zu, und dokumentiere den bisherigen Stand. "
-                  "Gehört die Arbeit bewusst zu keinem Projekt, beende ohne Ausgabe.")
-        return
-    if active or st.get("vault_fp") != vault_fp or not st:
-        settle()
-        return
-
-    base = project_dir(vault, slug)
-    session_note = base / "sessions" / f"{today()}.md"
-    if st.get("code_fp") and code_fp and code_fp != st.get("code_fp"):
-        reason = (
-            f"code-brain: Der Code im Projekt `{slug}` hat sich geändert, die Projektnotizen noch nicht. "
-            f"Aktualisiere jetzt den Vault in `{base}` - so, als wäre es die letzte Übergabe: "
-            "`Stand.md` (Ist-Stand, nächster Schritt), betroffene Feature-Notiz und Todos, neue oder "
-            f"überholte Entscheidungen, Wissen; kurzer Eintrag in `{session_note}`. "
-            "Keine Rückfrage, danach nur eine kurze Zeile ausgeben."
-        )
-        block(reason)
-        return
-    if prompts - int(st.get("doc_prompts", 0)) >= NUDGE_AFTER_PROMPTS:
-        reason = (
-            f"code-brain: Seit {NUDGE_AFTER_PROMPTS} Nachrichten keine Doku im Projekt `{slug}`. Prüfe kurz, "
-            "ob seitdem Entscheidungen, Pläne, Todos oder neues Wissen entstanden sind, und trage sie in den "
-            f"Vault (`{base}`) ein. Gibt es nichts, beende ohne Ausgabe."
-        )
-        st["doc_prompts"] = prompts      # nur einmal erinnern
-        save_state(vault, sid, st)
-        block(reason)
-        return
-    settle()
-
-
-def changed_vault_notes(vault: Path, slug: str) -> list[str]:
-    """Seit dem letzten Vault-Commit geaenderte Notizen des Projekts (relativ zum Projektordner)."""
-    if not vault_has_git(vault):
-        return []
-    _, out = run_git(["status", "--porcelain", "-z", "--untracked-files=all", "--",
-                      f"{PROJECTS_DIR}/{slug}"], vault)
-    prefix = f"{PROJECTS_DIR}/{slug}/"
-    files = []
-    entries = out.split("\0")
-    i = 0
-    while i < len(entries):
-        e = entries[i]
-        i += 1
-        if len(e) < 4:
-            continue
-        if e[0] in "RC":
-            i += 1                      # Umbenennung: Quellpfad folgt als eigener Eintrag
-        if "D" in e[:2]:
-            continue                    # gelöschte/archivierte Notizen nicht verlinken
-        path = e[3:]
-        if path.startswith(prefix) and path.endswith(".md"):
-            files.append(path[len(prefix):])
-    return files
-
-
-def auto_session_line(vault: Path, slug: str) -> None:
-    """Verlauf ohne Tokenkosten: hat Claude in dieser Antwort keine Session-Zeile geschrieben,
-    haengt der Hook eine an, die auf die geaenderten Notizen verlinkt."""
-    changed = changed_vault_notes(vault, slug)
-    today_rel = f"sessions/{today()}.md"
-    notes = [c for c in changed if c != "Index.md" and not c.startswith(("sessions/", "archiv/"))]
-    if not notes or today_rel in changed:
-        return
-    links = ", ".join(f"[[{PROJECTS_DIR}/{slug}/{n[:-3]}|{Path(n).stem}]]" for n in notes[:8])
-    more = f" (+{len(notes) - 8})" if len(notes) > 8 else ""
-    p = project_dir(vault, slug) / today_rel
-    text = read_text(p) or f"---\ntype: session\nsummary: Verlauf {today()}\n---\n\n# {today()}\n"
-    write_text(p, text.rstrip("\n") + f"\n- {now_hm()} aktualisiert: {links}{more}\n")
-
-
-def hook_session_end(payload: dict) -> None:
-    vault = vault_root(required=False)
-    if not vault:
-        return
-    slug, _, _ = detect_project(vault, Path(payload.get("cwd") or os.getcwd()))
+    st["slug"] = slug
+    hints = st.pop("pending", [])
+    note_vault_activity(vault, slug, st)
     if slug:
-        auto_session_line(vault, slug)
-        write_index(vault, slug)
-    remember_sync(vault, sync_push(vault, (slug or "global") + " session-ende"))
+        base = project_dir(vault, slug)
+        if st.get("awaiting_stop"):
+            hints.append("code-brain: Die letzte Antwort wurde abgebrochen. Prüfe kurz, ob `Arbeitsstand.md` und "
+                         "das Arbeitspaket den tatsächlichen Stand zeigen, und korrigiere sie bei Bedarf.")
+        since = st.get("prompts", 0) - st.get("doc_at", 0)
+        if since >= NUDGE_AFTER_PROMPTS:
+            hints.append(f"code-brain: Seit {since} Nachrichten kein Eintrag im Vault (`{base.as_posix()}`). Prüfe, ob seitdem "
+                         "Entscheidungen, gestrichene Vorhaben, neue Aufgaben oder Wissen entstanden sind, und trag "
+                         "sie am richtigen Ort ein. Nichts davon → nichts tun.")
+            st["doc_at"] = st.get("prompts", 0)
+    st["prompts"] = st.get("prompts", 0) + 1
+    st["awaiting_stop"] = True
+    save_state(vault, sid, st)
+    emit_context("UserPromptSubmit", hints)
 
 
-def hook_post_write(payload: dict) -> None:
-    """Direktes Feedback, wenn eine Vault-Notiz nicht dem Format entspricht (blockiert nichts)."""
-    vault = vault_root(required=False)
-    if not vault:
-        return
-    ti = payload.get("tool_input") or {}
-    fp = ti.get("file_path") or ti.get("path") or ""
-    if not fp.lower().endswith(".md"):
-        return
-    note = Path(fp)
+def plan_items(tool: str, ti: dict) -> tuple[list[str], bool] | None:
+    """(Titel der Schritte, alle erledigt) oder None, wenn der Aufruf keine neue Liste enthält."""
+    if tool == "TodoWrite":
+        todos = ti.get("todos") or []
+        items = [str(t.get("content", "")) for t in todos if isinstance(t, dict)]
+        done = bool(todos) and all(isinstance(t, dict) and t.get("status") == "completed" for t in todos)
+        return items, done
+    if tool == "mcp__ccd_turn__update_plan":
+        if not ti.get("items"):
+            return None                     # nur advance/done/start - keine neue Liste
+        items = [str(i.get("content", "")) for i in ti["items"] if isinstance(i, dict)]
+        done = all(isinstance(i, dict) and i.get("status") == "completed" for i in ti["items"])
+        return items, done
+    if tool == "TaskCreate":
+        return [str(ti.get("subject") or ti.get("title") or ti.get("description") or "Aufgabe")], False
+    return None
+
+
+def start_hint(slug: str, base: Path, title: str) -> str:
+    return (f"code-brain: Neue Aufgabe „{title}“ im Projekt `{slug}`. Vor dem Planen: "
+            f'`{cli_cmd()} search "<begriffe der aufgabe>"` und die Treffer lesen (Arbeitspaket, Wissen, '
+            f"Projektregeln). Dann `{(base / PAKETE_DIR).as_posix()}/<nr-name>.md` anlegen oder aktualisieren (Ziel, Todos) und "
+            "in `Arbeitsstand.md` › In Arbeit eintragen. Ist es keine Projektarbeit, ignorieren.")
+
+
+def end_hint(base: Path) -> str:
+    return (f"code-brain: Aufgabe abgeschlossen, aber `{(base / STAND_FILE).as_posix()}` ist seit dem Start unverändert. "
+            "Trag jetzt ein, bevor du abschließt: im Arbeitspaket › Ergebnis (was gebaut, wo: Branch/PR/Dateien, "
+            "was offen) und Status; in `Arbeitsstand.md` In Arbeit → Zuletzt abgeschlossen, Nächste Schritte. "
+            "Ist nichts Dauerhaftes passiert, nichts tun.")
+
+
+def write_hint(vault: Path, note: Path) -> str:
+    """Formatfehler einer Vault-Notiz direkt nach dem Schreiben melden."""
+    if not note.name.lower().endswith(".md"):
+        return ""
     try:
         rel = note.resolve().relative_to(vault.resolve()).as_posix()
     except (ValueError, OSError):
-        return
-    if rel.startswith((SYSTEM_DIR + "/", ".")) or note.name in ("Index.md", "README.md"):
-        return
+        return ""
+    if rel.startswith((SYSTEM_DIR + "/", ".")) or note.name == "README.md":
+        return ""
     text = read_text(note)
+    meta, _ = parse_frontmatter(text)
     problems = []
-    meta, body = parse_frontmatter(text)
-    in_project = rel.startswith(PROJECTS_DIR + "/")
-    if in_project and "/sessions/" not in rel:
+    if rel.startswith((PROJECTS_DIR + "/", GLOBAL_DIR + "/")):
         missing = [k for k in ("type", "summary", "updated") if not meta.get(k)]
+        if f"/{PAKETE_DIR}/" in rel and not meta.get("status"):
+            missing.append("status")
         if missing:
-            problems.append(f"Frontmatter fehlt: {', '.join(missing)} (summary = eine Zeile für den Index)")
+            problems.append(f"Frontmatter fehlt: {', '.join(missing)}")
+    if f"/{PAKETE_DIR}/" in rel or f"/{WISSEN_DIR}/" in rel:
+        if not meta.get("stichworte"):
+            problems.append("`stichworte` fehlen (Suchbegriffe, damit spätere Agenten die Notiz finden)")
+    for name in LEGACY:
+        if f"/{name}/" in "/" + rel + "/" and rel.startswith(PROJECTS_DIR + "/"):
+            problems.append(f"`{name}` gehört zur alten Struktur - stattdessen Projekt.md, Arbeitsstand.md, "
+                            "arbeitspakete/ oder wissen/ nutzen")
+            break
     for tag in as_list(meta.get("tags")):
         if not re.fullmatch(r"[\w/-]*[A-Za-z_/-][\w/-]*", str(tag)):
             problems.append(f"ungültiger Tag `{tag}` (nur Buchstaben, Ziffern, _ - /, ohne #)")
     if SECRET_RE.search(text):
         problems.append("enthält etwas, das wie ein Passwort/Schlüssel aussieht - durch Verweis ersetzen "
                         "(sonst stoppt der Vault-Commit)")
-    if problems:
-        block(f"code-brain: `{rel}` korrigieren: " + "; ".join(problems))
+    return f"code-brain: `{rel}` korrigieren: " + "; ".join(problems) if problems else ""
+
+
+def hook_post_tool(payload: dict) -> None:
+    vault = vault_root(required=False)
+    if not vault:
+        return
+    tool = payload.get("tool_name", "")
+    ti = payload.get("tool_input") or {}
+    cwd = Path(payload.get("cwd") or os.getcwd())
+    sid = payload.get("session_id", "")
+    hints: list[str] = []
+
+    if tool in WRITE_TOOLS:
+        fp = ti.get("file_path") or ti.get("notebook_path") or ti.get("path") or ""
+        if not fp:
+            return
+        h = write_hint(vault, Path(fp))
+        if h:
+            hints.append(h)
+        else:
+            try:
+                Path(fp).resolve().relative_to(vault.resolve())
+                inside = True
+            except (ValueError, OSError):
+                inside = False
+            if not inside and not is_generic_dir(cwd):
+                slug, _, _ = detect_project(vault, cwd)
+                st = load_state(vault, sid)
+                if not slug and not st.get("asked_new"):
+                    st["asked_new"] = True
+                    save_state(vault, sid, st)
+                    hints.append("code-brain: In diesem Ordner wird Code geändert, aber er gehört zu keinem Projekt "
+                                 f'im Vault. Lege es an (`{cli_cmd()} new --name "<Projektname>" --cwd "{cwd}"`) oder '
+                                 "ordne ihn mit `link <slug>` zu. Gehört die Arbeit bewusst zu keinem Projekt, ignorieren.")
+        emit_context("PostToolUse", hints)
+        return
+
+    parsed = plan_items(tool, ti)
+    if parsed is None:
+        return
+    slug, _, _ = detect_project(vault, cwd)
+    if not slug:
+        return
+    base = project_dir(vault, slug)
+    st = load_state(vault, sid)
+    items, all_done = parsed
+    task = st.get("task") or {}
+    if all_done and items:
+        if task.get("open") and stand_mark(vault, slug) == task.get("stand_mark"):
+            hints.append(end_hint(base))
+        st["task"] = {**task, "open": False}
+    else:
+        old = set(task.get("items") or [])
+        new = set(items)
+        fresh = not task.get("open") or (tool != "TaskCreate" and len(old & new) * 2 < max(len(new), 1))
+        if fresh:
+            st["task"] = {"open": True, "title": (items[0] if items else "Aufgabe")[:80], "items": items,
+                          "started": now_ts(), "stand_mark": stand_mark(vault, slug)}
+            hints.append(start_hint(slug, base, st["task"]["title"]))
+        elif tool != "TaskCreate":
+            st["task"]["items"] = items
+    hints = st.pop("pending", []) + hints
+    save_state(vault, sid, st)
+    emit_context("PostToolUse", hints)
+
+
+def hook_pre_tool(payload: dict) -> None:
+    """Abschluss (wrap_up): Ist Arbeitsstand.md seit dem Aufgabenstart unverändert, einmal zurückhalten,
+    damit das Eintragen vor der Abschlussmeldung passiert und nicht danach."""
+    vault = vault_root(required=False)
+    if not vault or payload.get("tool_name", "") not in END_TOOLS:
+        return
+    cwd = Path(payload.get("cwd") or os.getcwd())
+    sid = payload.get("session_id", "")
+    slug, _, _ = detect_project(vault, cwd)
+    if not slug:
+        return
+    st = load_state(vault, sid)
+    task = st.get("task") or {}
+    if not task.get("open"):
+        return                          # keine Aufgabe offen (reines Gespräch) oder schon erinnert
+    st["task"] = {**task, "open": False}
+    save_state(vault, sid, st)
+    if stand_mark(vault, slug) == task.get("stand_mark"):
+        emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                     "permissionDecisionReason": end_hint(project_dir(vault, slug))
+                                     + " Danach den Abschluss erneut aufrufen."}})
+
+
+def settle(vault: Path, slug: str | None, st: dict, label: str) -> None:
+    """Vault committen und pushen, wenn sich etwas geändert hat; Probleme für die nächste Nachricht merken."""
+    note_vault_activity(vault, slug, st)
+    if not st.pop("dirty", False) and not st.get("unsynced"):
+        return
+    msg = sync_push(vault, label)
+    remember_sync(vault, msg)
+    st["unsynced"] = bool(msg)
+    if msg.startswith("Commit gestoppt"):
+        st.setdefault("pending", []).append(f"code-brain: {msg}")
+
+
+def hook_stop(payload: dict) -> None:
+    """Nach jeder Antwort: nur speichern. Blockiert nie."""
+    vault = vault_root(required=False)
+    if not vault:
+        return
+    sid = payload.get("session_id", "")
+    slug, _, _ = detect_project(vault, Path(payload.get("cwd") or os.getcwd()))
+    st = load_state(vault, sid)
+    st["awaiting_stop"] = False
+    settle(vault, slug, st, slug or "global")
+    save_state(vault, sid, st)
+
+
+def hook_pre_compact(payload: dict) -> None:
+    vault = vault_root(required=False)
+    if not vault:
+        return
+    sid = payload.get("session_id", "")
+    slug, _, _ = detect_project(vault, Path(payload.get("cwd") or os.getcwd()))
+    st = load_state(vault, sid)
+    settle(vault, slug, st, (slug or "global") + " vor komprimierung")
+    save_state(vault, sid, st)
+
+
+def hook_session_end(payload: dict) -> None:
+    vault = vault_root(required=False)
+    if not vault:
+        return
+    sid = payload.get("session_id", "")
+    slug, _, _ = detect_project(vault, Path(payload.get("cwd") or os.getcwd()))
+    st = load_state(vault, sid)
+    st["ended"] = True
+    st["dirty"] = True                  # am Ende immer einmal synchronisieren
+    settle(vault, slug, st, (slug or "global") + " session-ende")
+    save_state(vault, sid, st)
+
+
+HOOKS = {"session-start": hook_session_start, "user-prompt": hook_user_prompt, "pre-tool": hook_pre_tool,
+         "post-tool": hook_post_tool, "post-write": hook_post_tool,   # post-write: alter Name, laufende Sessions
+         "stop": hook_stop, "pre-compact": hook_pre_compact, "session-end": hook_session_end}
 
 
 def cmd_hook(a) -> None:
     payload = hook_payload()
     try:
-        {"session-start": hook_session_start, "stop": hook_stop,
-         "session-end": hook_session_end, "post-write": hook_post_write}[a.event](payload)
+        HOOKS[a.event](payload)
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001 - ein Hook darf die Session nie blockieren
@@ -1331,24 +1287,19 @@ def main(argv: list[str] | None = None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init"); p.add_argument("--vault", required=True); p.add_argument("--remote")
-    p.add_argument("--gh-user", help="gh-Konto fuer den Vault-Zugriff, falls nicht das aktive Konto")
+    p.add_argument("--gh-user", help="gh-Konto für den Vault-Zugriff, falls nicht das aktive Konto")
     p.set_defaults(func=cmd_init)
     p = sub.add_parser("status"); p.add_argument("--cwd"); p.set_defaults(func=cmd_status)
     p = sub.add_parser("new"); p.add_argument("--name", required=True); p.add_argument("--slug")
     p.add_argument("--cwd"); p.set_defaults(func=cmd_new)
     p = sub.add_parser("link"); p.add_argument("slug"); p.add_argument("--cwd"); p.set_defaults(func=cmd_link)
     p = sub.add_parser("context"); p.add_argument("--cwd"); p.set_defaults(func=cmd_context)
-    p = sub.add_parser("index"); p.add_argument("slug", nargs="?"); p.set_defaults(func=cmd_index)
     p = sub.add_parser("search"); p.add_argument("query"); p.add_argument("--all", action="store_true")
-    p.add_argument("--archiv", action="store_true"); p.add_argument("-n", type=int, default=8)
-    p.set_defaults(func=cmd_search)
-    p = sub.add_parser("check"); p.add_argument("slug", nargs="?"); p.add_argument("--fix", action="store_true")
-    p.add_argument("--all", action="store_true"); p.set_defaults(func=cmd_check)
-    p = sub.add_parser("archive"); p.add_argument("file"); p.set_defaults(func=cmd_archive)
+    p.add_argument("-n", type=int, default=8); p.set_defaults(func=cmd_search)
+    p = sub.add_parser("check"); p.add_argument("slug", nargs="?"); p.add_argument("--all", action="store_true")
+    p.set_defaults(func=cmd_check)
     p = sub.add_parser("sync"); p.add_argument("direction", choices=["pull", "push"]); p.set_defaults(func=cmd_sync)
-    p = sub.add_parser("hook")
-    p.add_argument("event", choices=["session-start", "stop", "session-end", "post-write"])
-    p.set_defaults(func=cmd_hook)
+    p = sub.add_parser("hook"); p.add_argument("event", choices=sorted(HOOKS)); p.set_defaults(func=cmd_hook)
 
     a = ap.parse_args(argv)
     a.func(a)

@@ -23,7 +23,7 @@ python "<pfad>/vault.py" init --vault "<ordner>" --remote "<repo-url>" [--gh-use
 
 Das Skript:
 - holt das Repo in den Ordner (auch in einen frisch in Obsidian angelegten Vault, der nur `.obsidian/` enthält) oder legt ein neues Git-Repo an,
-- legt `_brain/`, `projekte/`, `global/Regeln.md`, `README.md`, `.gitignore` und `.gitattributes` an,
+- legt `_brain/`, `projekte/`, `global/Arbeitsregeln.md`, `global/wissen/`, `README.md`, `.gitignore` und `.gitattributes` an,
 - schreibt `~/.code-brain/config.json` mit dem Vault-Pfad,
 - macht den ersten Commit und pusht.
 

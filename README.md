@@ -1,11 +1,12 @@
 # code-brain
 
-Automatisches Projekt-Memory für Claude Code in einem zentralen Obsidian-Vault.
+Automatisches Memory für Claude Code in einem zentralen Obsidian-Vault - für Projekte und für Themen ohne Projekt.
 
-- **Kein Befehl nötig:** Beim Session-Start erkennt code-brain das Projekt am Ordner (Git-Remote, sonst Pfad) und lädt Ist-Stand, offene Todos, Plan, Verbote und einen Index aller gültigen Notizen. Ziel sind 2-4k Tokens, egal wie groß das Projekt ist.
-- **Laufend aktuell:** Claude dokumentiert während der Arbeit Entscheidungen, verworfene Ansätze, Todos, Plan und Wissen. Jedes Update ist eine vollständige Übergabe. Ändert sich Code ohne Doku, erzwingt der Stop-Hook das Nachtragen.
-- **Selbstreinigend:** Ersetzte und verworfene Entscheidungen, fertige Features und alte erledigte Todos wandern automatisch ins Archiv. Dort bleiben sie durchsuchbar, werden aber nicht mehr geladen.
-- **Mehrere Geräte:** Der Vault ist ein Git-Repo. Beim Start wird gepullt, nach jedem Update committet und gepusht, mit Schutz vor Zugangsdaten.
+- **Kein Befehl nötig:** Beim Session-Start erkennt code-brain das Projekt am Ordner (Pfad, sonst Git-Remote) und lädt Arbeitsregeln, Projektsteckbrief mit Projektregeln und Verworfenem, Arbeitsstand, offene Arbeitspakete und die Wissensthemen - fest begrenzt, egal wie groß das Projekt ist.
+- **Jede Information an genau einem Ort:** `Projekt.md` (was dauerhaft gilt), `Arbeitsstand.md` (was läuft und kommt), `arbeitspakete/` (je Feature/Bug alles inkl. Ergebnis), `wissen/` (Nachschlagen, auch global).
+- **Erinnert, ohne zu blockieren:** Hinweise beim Aufgabenstart (Task-Liste), beim Aufgabenende (Abschluss), nach 8 Nachrichten ohne Eintrag, nach Abbruch und nach Komprimierung - immer als Kontext, nie als erzwungene Extra-Runde.
+- **Kein Archiv:** Unwichtiges wird gelöscht, die Git-Historie des Vaults behält alles.
+- **Mehrere Geräte:** Der Vault ist ein Git-Repo. Beim Start wird gepullt, nach jeder Antwort mit Änderungen committet und gepusht, mit Schutz vor Zugangsdaten.
 - **Schlank:** nur Python-Standardbibliothek und Git, kein MCP, keine Datenbank.
 
 ## Installation
@@ -23,7 +24,7 @@ In der nächsten Session meldet code-brain, dass es noch nicht eingerichtet ist,
 
 ```
 .claude-plugin/          plugin.json, marketplace.json
-hooks/hooks.json         SessionStart, Stop, SessionEnd, PostToolUse
+hooks/hooks.json         SessionStart, UserPromptSubmit, PreToolUse (wrap_up), PostToolUse, Stop, PreCompact, SessionEnd
 hooks/run.sh             findet ein lauffähiges Python (Windows-Store-Platzhalter wird übersprungen)
 skills/code-brain/
   SKILL.md               Arbeitsregeln für Claude
@@ -35,11 +36,20 @@ skills/code-brain/
 ## Vault
 
 ```
-global/Regeln.md                 gilt für alle Projekte
+global/Arbeitsregeln.md  global/wissen/<Thema>.md
 projekte/<slug>/
-  <slug>.md  Stand.md  Plan.md  Todos.md  Index.md
-  features/  entscheidungen/  wissen/  sessions/  archiv/
+  Projekt.md  Arbeitsstand.md  arbeitspakete/  wissen/
 ```
+
+## Hooks
+
+| Ereignis | Wirkung |
+|---|---|
+| `SessionStart` | Pull, Startkontext; nach Komprimierung Hinweis zum Nachtragen; meldet nicht abgeschlossene Aufgaben früherer Sessions |
+| `UserPromptSubmit` | Hinweis nach 8 Nachrichten ohne Vault-Eintrag, nach abgebrochener Antwort, bei gestopptem Commit |
+| `PostToolUse` | Formatprüfung geschriebener Notizen; Task-Liste angelegt → Hinweis Aufgabenstart; alle Todos erledigt → Hinweis Aufgabenende |
+| `PreToolUse` (`mcp__ccd_turn__wrap_up`) | Abschluss ohne aktualisierten Arbeitsstand → einmal zurückgehalten mit Hinweis |
+| `Stop`, `PreCompact`, `SessionEnd` | Commit + Push des Vaults, blockieren nie |
 
 ## Voraussetzungen
 

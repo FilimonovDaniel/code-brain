@@ -1,33 +1,24 @@
 ---
 type: projekt
-status: aktiv
 summary: {{name}} - Zweck in einem Satz ergänzen
 repo: {{remote}}
 pfad: {{path}}
-created: {{date}}
 updated: {{date}}
-tags:
-  - projekt/{{slug}}
 ---
 
 # {{name}}
 
-> [!abstract] Für den nächsten Agenten
-> Projekt-Hub: was das Projekt ist, woraus es besteht, was nie wieder passieren soll.
-> Der aktuelle Ist-Stand steht in [[projekte/{{slug}}/Stand|Stand]], offene Aufgaben in [[projekte/{{slug}}/Todos|Todos]], der Fahrplan in [[projekte/{{slug}}/Plan|Plan]], alle Notizen im [[projekte/{{slug}}/Index|Index]].
+%% Wird bei jedem Start ganz geladen - unter 2.800 Zeichen halten. Nur was dauerhaft gilt. %%
 
 ## Zweck
-%% Wofür gibt es das Projekt, für wen? 2-4 Sätze. %%
+%% Wofür, für wen - 1-3 Zeilen. %%
 
-## Stack & Architektur
-%% Sprachen, Frameworks, wichtigste Bausteine und wie sie zusammenhängen. Details in wissen/. %%
+## Technik
+- Repo: {{remote}} · Lokal: `{{path}}`
+%% Stack, Bausteine, Konventionen (Branches, Deploy) - nur Nicht-Offensichtliches. Details in wissen/. %%
 
-## Wichtige Orte
-- Repo: {{remote}}
-- Lokal: `{{path}}`
+## Projektregeln
+%% Was dauerhaft gilt, auch was nie getan wird - je Zeile: Regel - Grund (Datum). Überholte Regel durch die neue ersetzen. %%
 
-## Konventionen
-%% Branches, Commits, Tests, Deploy - nur was nicht offensichtlich ist. %%
-
-## Nicht tun
-%% Verbote und bewusst verworfene Wege, je eine Zeile mit Link zur Entscheidung. Wird bei jedem Start geladen. %%
+## Verworfen
+%% Ideen und Ansätze, die bewusst nicht gemacht werden, damit niemand sie erneut vorschlägt - je Zeile: Idee - Grund (Datum). %%
