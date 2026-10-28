@@ -1,6 +1,6 @@
 {
   "name": "code-brain",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Automatisches Projekt-Memory fürs Coding in einem zentralen Obsidian-Vault: erkennt das Projekt am Ordner, lädt beim Start Stand, Todos, Plan und Entscheidungen und hält alles während der Arbeit selbstständig aktuell. Git-Sync für mehrere Geräte.",
   "author": {
     "name": "Daniel Filimonov"

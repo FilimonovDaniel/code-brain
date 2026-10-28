@@ -48,6 +48,7 @@ CONTEXT_BUDGET = 9300
 NUDGE_AFTER_PROMPTS = 8          # Hinweis nach so vielen Nutzer-Nachrichten ohne Eintrag im Vault
 STALE_TASK_HOURS = 3             # offene Aufgabe einer anderen, so lange stillen Session gilt als abgebrochen
 GIT_TIMEOUT = 12
+PULL_EVERY = 600                 # Sekunden: so oft holt eine laufende Session Einträge anderer Geräte nach
 
 PROJECTS_DIR = "projekte"
 GLOBAL_DIR = "global"
@@ -115,8 +116,10 @@ def slugify(text: str) -> str:
 
 def run_git(args: list[str], cwd: str | Path, timeout: int = GIT_TIMEOUT) -> tuple[int, str]:
     try:
+        # Ohne Terminal-Prompt: fehlende Anmeldung scheitert sofort statt bis zum Timeout zu warten.
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+                           encoding="utf-8", errors="replace", timeout=timeout, env=env)
         return r.returncode, (r.stdout + r.stderr).strip()
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
@@ -399,10 +402,12 @@ def wissen_part(vault: Path, base: Path | None) -> str:
     return ("## Wissen (nur Themen - bei Bezug Datei öffnen oder `search`)\n" + "\n".join(lines))
 
 
-def build_context(vault: Path, cwd: Path, notes: list[str] | None = None) -> str:
+def build_context(vault: Path, cwd: Path, notes: list[str] | None = None, sync_info: str = "") -> str:
     slug, entry, how = detect_project(vault, cwd)
     cmd = cli_cmd()
     parts: list[str] = []
+    if sync_info:
+        parts.append(f"> [!info] {sync_info}")
     for n in notes or []:
         parts.append(f"> [!warning] code-brain\n> {n}")
     rules = note_body(vault / GLOBAL_DIR / RULES_FILE)
@@ -513,24 +518,55 @@ def pull_rebase(vault: Path) -> tuple[int, str]:
     return code, out
 
 
-def sync_pull(vault: Path) -> str:
-    """Leerer String = ok/nichts zu tun, sonst Warnung für den Kontext."""
-    if not vault_has_git(vault) or not vault_has_remote(vault):
+def upstream_head(vault: Path) -> str:
+    code, out = run_git(["rev-parse", "-q", "--verify", "@{u}"], vault, timeout=5)
+    return out.strip() if code == 0 else ""
+
+
+def remote_news(vault: Path, before: str) -> str:
+    """Was der Pull von anderen Geräten gebracht hat (Commits zwischen altem und neuem Remote-Stand)."""
+    after = upstream_head(vault)
+    if not after or after == before:
         return ""
+    rng = f"{before}..{after}" if before else after
+    _, log = run_git(["log", "--format=%s", rng], vault, timeout=5)
+    _, files = run_git(["diff", "--name-only", rng, "--", "*.md"] if before
+                       else ["show", "--name-only", "--format=", after, "--", "*.md"], vault, timeout=5)
+    commits = [c for c in log.splitlines() if c.strip()]
+    changed = [f for f in files.splitlines() if f.strip() and not f.startswith(".")]
+    if not commits:
+        return ""
+    text = f"{len(commits)} Commit(s) von anderen Geräten übernommen: " + "; ".join(commits[:4])
+    if len(commits) > 4:
+        text += " …"
+    if changed:
+        text += ". Geänderte Notizen: " + ", ".join(f"`{f}`" for f in changed[:8]) + (" …" if len(changed) > 8 else "")
+    return text
+
+
+def sync_pull(vault: Path) -> tuple[bool, str, str]:
+    """Holt den Vault vom Remote. Ergebnis: (ok, Warnung, Neues von anderen Geräten)."""
+    if not vault_has_git(vault) or not vault_has_remote(vault):
+        return True, "", ""
     # Erst lokal committen: Rebase auf sauberem Stand statt Stash-Akrobatik.
     warn = commit_local(vault, "lokal vor pull")
+    before = upstream_head(vault)
     code, out = pull_rebase(vault)
-    if code != 0:
+    ok = code == 0
+    if not ok:
         low = out.lower()
         if "could not resolve" in low or "unable to access" in low or "timed out" in low:
-            warn = (warn + " " if warn else "") + "Vault konnte nicht aktualisiert werden (offline?) - arbeite mit lokalem Stand."
+            reason = "Remote nicht erreichbar (offline?)"
         else:
-            warn = (warn + " " if warn else "") + f"git pull im Vault fehlgeschlagen - bitte prüfen: {out[:300]}"
+            reason = f"git pull fehlgeschlagen: {out[:300]}"
+        warn = (warn + " " if warn else "") + (
+            f"Vault NICHT mit anderen Geräten abgeglichen - {reason}. Einträge anderer Geräte können fehlen; "
+            "code-brain versucht es bei jeder Nachricht erneut, von Hand: `vault.py sync pull`.")
     conflicts = conflict_files(vault)
     if conflicts:
         warn = (warn + " " if warn else "") + ("Konfliktmarker in: " + ", ".join(conflicts[:5])
                                                 + " - beide Fassungen zusammenführen und Marker entfernen.")
-    return warn
+    return ok, warn, remote_news(vault, before) if ok else ""
 
 
 def staged_secrets(vault: Path) -> list[str]:
@@ -956,8 +992,11 @@ def cmd_check(a) -> None:
 
 def cmd_sync(a) -> None:
     vault = vault_root()
-    msg = sync_pull(vault) if a.direction == "pull" else sync_push(vault, "manuell")
-    print(msg or "ok")
+    if a.direction == "pull":
+        _, warn, news = sync_pull(vault)
+        print("\n".join(x for x in (warn, news) if x) or "ok - Vault aktuell")
+    else:
+        print(sync_push(vault, "manuell") or "ok")
 
 
 # --------------------------------------------------------------------------- Hooks
@@ -998,10 +1037,14 @@ def hook_session_start(payload: dict) -> None:
     cwd = Path(payload.get("cwd") or os.getcwd())
     source = payload.get("source", "startup") or "startup"
     notes = []
-    if source in ("startup", "clear"):
-        sync = sync_pull(vault)
-        if sync:
-            notes.append(sync)
+    # Jeder Start (neu, fortgesetzt, nach /clear oder Komprimierung) gleicht zuerst mit anderen Geräten ab.
+    pull_ok, warn, news = sync_pull(vault)
+    if warn:
+        notes.append(warn)
+    sync_info = ""
+    if pull_ok and vault_has_remote(vault):
+        sync_info = (f"Vault-Sync {dt.datetime.now():%H:%M}: "
+                     + (news + "." if news else "aktuell, keine neuen Einträge anderer Geräte."))
     earlier = read_text(last_sync_file(vault)).strip()
     if earlier:
         notes.append(f"Letzter Sync: {earlier}")
@@ -1025,9 +1068,10 @@ def hook_session_start(payload: dict) -> None:
               "awaiting_stop": False, "task": {}, "stand_mark": stand_mark(vault, slug)}
     else:
         st.update({"slug": slug, "ended": False})
+    st.update({"pull_ok": pull_ok, "pulled_at": now_ts() if pull_ok else 0})
     save_state(vault, sid, st)
     prune_states(vault)
-    emit_context("SessionStart", [build_context(vault, cwd, notes)])
+    emit_context("SessionStart", [build_context(vault, cwd, notes, sync_info)])
 
 
 def note_vault_activity(vault: Path, slug: str | None, st: dict) -> None:
@@ -1037,6 +1081,28 @@ def note_vault_activity(vault: Path, slug: str | None, st: dict) -> None:
         st["vault_fp"] = fp
         st["doc_at"] = st.get("prompts", 0)
         st["dirty"] = True
+
+
+def pull_during_session(vault: Path, slug: str | None, st: dict) -> list[str]:
+    """Holt Einträge anderer Geräte nach: nach gescheitertem Start-Pull bei jeder Nachricht, sonst alle PULL_EVERY s."""
+    was_ok = st.get("pull_ok", True)
+    if was_ok and now_ts() - float(st.get("pulled_at", 0)) < PULL_EVERY:
+        return []
+    ok, warn, news = sync_pull(vault)
+    # Vom Remote geholte Notizen zählen nicht als eigener Eintrag dieser Session.
+    st["vault_fp"] = vault_fingerprint(vault, slug)
+    st["pull_ok"] = ok
+    if ok:
+        st["pulled_at"] = now_ts()
+    hints = []
+    if warn and (ok or was_ok):             # Offline-Warnung nur beim Wechsel, nicht bei jeder Nachricht
+        hints.append(f"code-brain: {warn}")
+    if news:
+        hints.append(f"code-brain: {news}. Betroffene Notizen neu lesen; der Startkontext dieser Session ist "
+                     "dafür veraltet.")
+    elif ok and not was_ok:
+        hints.append("code-brain: Vault jetzt mit anderen Geräten abgeglichen, keine neuen Einträge.")
+    return hints
 
 
 def hook_user_prompt(payload: dict) -> None:
@@ -1050,6 +1116,7 @@ def hook_user_prompt(payload: dict) -> None:
     st["slug"] = slug
     hints = st.pop("pending", [])
     note_vault_activity(vault, slug, st)
+    hints += pull_during_session(vault, slug, st)
     if slug:
         base = project_dir(vault, slug)
         if st.get("awaiting_stop"):

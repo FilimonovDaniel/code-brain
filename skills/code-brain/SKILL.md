@@ -58,15 +58,16 @@ Nicht dokumentieren: Smalltalk, Wissensfragen ohne Wert für später, Zwischensc
 
 | Wann | Was |
 |---|---|
-| Session-Start | Pull aus dem Git-Remote, Projekt am Ordner erkennen, Spalte "ja" aus Abschnitt 1 laden; meldet eine nicht abgeschlossene Aufgabe einer früheren Session |
+| Session-Start (neu, fortgesetzt, `/clear`, nach Komprimierung) | Pull aus dem Git-Remote, meldet im Kontext "Vault-Sync": aktuell oder welche Commits/Notizen anderer Geräte neu sind; Projekt am Ordner erkennen, Spalte "ja" aus Abschnitt 1 laden; meldet eine nicht abgeschlossene Aufgabe einer früheren Session |
 | nach Komprimierung (Gespräch zu lang, Claude Code fasst es zusammen) | lädt neu + Hinweis, fehlenden Stand nachzutragen |
 | Task-Liste angelegt | Hinweis Aufgabenstart (3.2); Bash/PowerShell, Edit/Write, Agent, neue Sessions gesperrt bis `search` gelaufen ist (Lesen bleibt frei) |
 | Abschluss (`wrap_up`) oder alle Todos erledigt | Hinweis Aufgabenende (3.4) - nur wenn `Arbeitsstand.md` seit dem Start unverändert ist |
+| Nachricht des Nutzers, alle 10 Min. | Pull nachholen; neue Einträge anderer Geräte → Hinweis, betroffene Notizen neu lesen. Start-Pull gescheitert (offline) → Warnung im Kontext, neuer Versuch bei jeder Nachricht |
 | Nachricht des Nutzers | Hinweis nach 8 Nachrichten ohne Eintrag oder nach einer abgebrochenen Antwort |
 | Notiz geschrieben | Formatprüfung (Frontmatter, Stichworte, Zugangsdaten) |
 | nach jeder Antwort, vor Komprimierung, Session-Ende | Commit + Push des Vaults, blockiert nie |
 
-Der Startkontext ist schon da - lies `Projekt.md` und `Arbeitsstand.md` nicht noch einmal. Pfad zu `vault.py` und zum Projektordner nennt der Startkontext.
+Der Startkontext ist schon da - lies `Projekt.md` und `Arbeitsstand.md` nicht noch einmal. Ausnahme: Ein Hinweis meldet neue Einträge anderer Geräte oder einen gescheiterten Sync - dann die genannten Notizen neu lesen; bei gescheitertem Sync dem Nutzer einmal sagen, dass Einträge anderer Geräte fehlen können. Pfad zu `vault.py` und zum Projektordner nennt der Startkontext.
 
 ## 7. Nachschlagen
 

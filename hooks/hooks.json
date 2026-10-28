@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh\" hook user-prompt",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }

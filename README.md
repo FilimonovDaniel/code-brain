@@ -6,7 +6,7 @@ Automatisches Memory für Claude Code in einem zentralen Obsidian-Vault - für P
 - **Jede Information an genau einem Ort:** `Projekt.md` (was dauerhaft gilt), `Arbeitsstand.md` (was läuft und kommt), `arbeitspakete/` (je Feature/Bug alles inkl. Ergebnis), `wissen/` (Nachschlagen, auch global).
 - **Erinnert und sperrt, wo nötig:** Nach einer neuen Task-Liste sind Bash/PowerShell, Edit/Write, Agenten und neue Sessions gesperrt, bis `vault.py search` gelaufen ist. Sonst Hinweise beim Aufgabenende (Abschluss), nach 8 Nachrichten ohne Eintrag, nach Abbruch und nach Komprimierung.
 - **Kein Archiv:** Unwichtiges wird gelöscht, die Git-Historie des Vaults behält alles.
-- **Mehrere Geräte:** Der Vault ist ein Git-Repo. Beim Start wird gepullt, nach jeder Antwort mit Änderungen committet und gepusht, mit Schutz vor Zugangsdaten.
+- **Mehrere Geräte:** Der Vault ist ein Git-Repo. Bei jedem Session-Start (auch fortgesetzt) wird gepullt und gemeldet, was andere Geräte neu eingetragen haben; laufende Sessions holen alle 10 Minuten nach, nach jeder Antwort mit Änderungen committet und gepusht, mit Schutz vor Zugangsdaten.
 - **Schlank:** nur Python-Standardbibliothek und Git, kein MCP, keine Datenbank.
 
 ## Installation
@@ -45,8 +45,8 @@ projekte/<slug>/
 
 | Ereignis | Wirkung |
 |---|---|
-| `SessionStart` | Pull, Startkontext; nach Komprimierung Hinweis zum Nachtragen; meldet nicht abgeschlossene Aufgaben früherer Sessions |
-| `UserPromptSubmit` | Hinweis nach 8 Nachrichten ohne Vault-Eintrag, nach abgebrochener Antwort, bei gestopptem Commit |
+| `SessionStart` | Pull (jeder Start) mit Meldung neuer Einträge anderer Geräte, Startkontext; nach Komprimierung Hinweis zum Nachtragen; meldet nicht abgeschlossene Aufgaben früherer Sessions |
+| `UserPromptSubmit` | Pull alle 10 Min. (nach gescheitertem Start-Pull bei jeder Nachricht), Hinweis auf neue Einträge anderer Geräte; Hinweis nach 8 Nachrichten ohne Vault-Eintrag, nach abgebrochener Antwort, bei gestopptem Commit |
 | `PostToolUse` | Formatprüfung geschriebener Notizen; Task-Liste angelegt → Hinweis Aufgabenstart; alle Todos erledigt → Hinweis Aufgabenende |
 | `PreToolUse` (Arbeitswerkzeuge) | offene Aufgabe ohne `vault.py search` → Bash/PowerShell, Edit/Write, Agent, Workflow, neue Session gesperrt; Lesen bleibt frei |
 | `PreToolUse` (`mcp__ccd_turn__wrap_up`) | Abschluss ohne aktualisierten Arbeitsstand → einmal zurückgehalten mit Hinweis |
