@@ -613,6 +613,16 @@ def upstream_head(vault: Path) -> str:
     return out.strip() if code == 0 else ""
 
 
+def has_unpushed(vault: Path) -> bool:
+    """True if local commits are missing on the remote (e.g. committed before a pull) or no upstream is set."""
+    if not vault_has_git(vault) or not vault_has_remote(vault):
+        return False
+    code, out = run_git(["rev-list", "--count", "@{u}..HEAD"], vault, timeout=5)
+    if code != 0:
+        return True                     # no upstream yet: push sets it
+    return out.strip() not in ("", "0")
+
+
 def remote_news(vault: Path, before: str) -> str:
     """Was der Pull von anderen Geräten gebracht hat (Commits zwischen altem und neuem Remote-Stand)."""
     after = upstream_head(vault)
@@ -1425,7 +1435,7 @@ def hook_pre_tool(payload: dict) -> None:
 def settle(vault: Path, slug: str | None, st: dict, label: str) -> None:
     """Vault committen und pushen, wenn sich etwas geändert hat; Probleme für die nächste Nachricht merken."""
     note_vault_activity(vault, slug, st)
-    if not st.pop("dirty", False) and not st.get("unsynced"):
+    if not st.pop("dirty", False) and not st.get("unsynced") and not has_unpushed(vault):
         return
     msg = sync_push(vault, label)
     remember_sync(vault, msg)
