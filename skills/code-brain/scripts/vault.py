@@ -341,10 +341,14 @@ def strip_comments(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", COMMENT_RE.sub("", text)).strip()
 
 
-def note_body(p: Path) -> str:
+def text_body(text: str) -> str:
     """Inhalt ohne Frontmatter, Kommentare und erste Überschrift."""
-    _, body = note_meta(p)
+    _, body = parse_frontmatter(text)
     return re.sub(r"^#\s.*\n?", "", strip_comments(body), count=1).strip()
+
+
+def note_body(p: Path) -> str:
+    return text_body(read_text(p))
 
 
 def demote(text: str) -> str:
@@ -374,6 +378,92 @@ CORE_RULES = """\
 - Jede Information an genau einem Ort: was dauerhaft gilt und was verworfen ist → `Projekt.md`; was läuft und was kommt → `Arbeitsstand.md`; alles zu einem Feature/Bug (Ziel, Todos, Festgelegt, Ergebnis) → `arbeitspakete/<nr-name>.md`; wie etwas geht → `wissen/` (ohne Projekt: `global/wissen/`).
 - Sofort eintragen, wenn der Nutzer etwas entscheidet, ändert oder streicht. Aufgabenstart: erst `{cmd} search "<begriffe>"`, Treffer lesen, dann Arbeitspaket + Arbeitsstand. Aufgabenende: Ergebnis + Arbeitsstand.
 - Unwichtiges löschen statt sammeln, nichts doppelt. Frontmatter: `type`, `summary`, `stichworte`, `updated`."""
+
+
+def size_limit(vault: Path, note: Path) -> int:
+    """Return the start-context character limit for a note, or 0 if it is not loaded in full."""
+    try:
+        rel = note.resolve().relative_to(vault.resolve()).as_posix()
+    except (ValueError, OSError):
+        return 0
+    if rel == f"{GLOBAL_DIR}/{RULES_FILE}":
+        return MAX_RULES
+    parts = rel.split("/")
+    if len(parts) == 3 and parts[0] == PROJECTS_DIR:
+        return {HUB_FILE: MAX_HUB, STAND_FILE: MAX_STAND}.get(parts[2], 0)
+    return 0
+
+
+SHORTEN_HOW = ("je Eintrag eine Zeile, Details/Belege ins Arbeitspaket verschieben und verlinken, "
+               "Erledigtes und Überholtes löschen")
+
+
+def body_size(text: str) -> int:
+    """Characters the start context needs for a note's content."""
+    return len(demote(text_body(text)))
+
+
+def size_problem(vault: Path, note: Path) -> str:
+    """Describe how far a fully loaded note exceeds its limit, measured as the start context counts it."""
+    limit = size_limit(vault, note)
+    if not limit or not note.exists():
+        return ""
+    n = body_size(read_text(note))
+    if n <= limit:
+        return ""
+    return (f"{n} Zeichen, der Startkontext lädt nur {limit} - der Rest fehlt jeder neuen Session. "
+            f"Datei ganz lesen und jetzt kürzen: {SHORTEN_HOW}")
+
+
+def text_after_write(tool: str, ti: dict, current: str) -> str | None:
+    """Return a note's text as it would be after a Write/Edit/MultiEdit, or None if unknown."""
+    if tool == "Write":
+        return ti.get("content")
+    edits = ti.get("edits") if tool == "MultiEdit" else [ti] if tool == "Edit" else None
+    if not edits:
+        return None
+    text = current
+    for e in edits:
+        old, new = e.get("old_string", ""), e.get("new_string", "")
+        if not old or old not in text:
+            return None
+        text = text.replace(old, new) if e.get("replace_all") else text.replace(old, new, 1)
+    return text
+
+
+def size_gate(vault: Path, tool: str, ti: dict) -> bool:
+    """Deny a write that would push a fully loaded note over its limit; shrinking writes stay allowed."""
+    fp = ti.get("file_path") or ""
+    if not fp or not size_limit(vault, Path(fp)):
+        return False
+    note = Path(fp)
+    current = read_text(note) if note.exists() else ""
+    after = text_after_write(tool, ti, current)
+    if after is None:
+        return False
+    limit, n = size_limit(vault, note), body_size(after)
+    if n <= limit or n < body_size(current):
+        return False
+    rel = note.resolve().relative_to(vault.resolve()).as_posix()
+    emit({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                 "permissionDecisionReason":
+                                     f"code-brain: Gesperrt - `{rel}` hätte danach {n} Zeichen, der Startkontext "
+                                     f"lädt nur {limit}; der Rest würde jeder neuen Session fehlen. Kürzer schreiben: "
+                                     f"{SHORTEN_HOW}. Danach erneut schreiben."}})
+    return True
+
+
+def oversized_notes(vault: Path, base: Path | None) -> list[str]:
+    """List fully loaded notes that exceed their limit, as warnings for the start context."""
+    notes = [vault / GLOBAL_DIR / RULES_FILE]
+    if base:
+        notes += [base / HUB_FILE, base / STAND_FILE]
+    out = []
+    for p in notes:
+        problem = size_problem(vault, p)
+        if problem:
+            out.append(f"`{p.relative_to(vault).as_posix()}` hat {problem}.")
+    return out
 
 
 def clip(text: str, limit: int, pointer: str) -> str:
@@ -408,7 +498,7 @@ def build_context(vault: Path, cwd: Path, notes: list[str] | None = None, sync_i
     parts: list[str] = []
     if sync_info:
         parts.append(f"> [!info] {sync_info}")
-    for n in notes or []:
+    for n in (notes or []) + oversized_notes(vault, project_dir(vault, slug) if slug else None):
         parts.append(f"> [!warning] code-brain\n> {n}")
     rules = note_body(vault / GLOBAL_DIR / RULES_FILE)
     rules_part = ("## Arbeitsregeln\n" + clip(demote(rules), MAX_RULES, f"{GLOBAL_DIR}/{RULES_FILE}")
@@ -1199,6 +1289,9 @@ def write_hint(vault: Path, note: Path) -> str:
     if SECRET_RE.search(text):
         problems.append("enthält etwas, das wie ein Passwort/Schlüssel aussieht - durch Verweis ersetzen "
                         "(sonst stoppt der Vault-Commit)")
+    size = size_problem(vault, note)
+    if size:
+        problems.append(size)
     return f"code-brain: `{rel}` korrigieren: " + "; ".join(problems) if problems else ""
 
 
@@ -1297,7 +1390,8 @@ def search_gate(vault: Path, sid: str, tool: str, ti: dict) -> None:
 
 
 def hook_pre_tool(payload: dict) -> None:
-    """Sperre vor der Suche (search_gate) und Abschluss (wrap_up): Ist Arbeitsstand.md seit dem
+    """Sperre für zu große Startkontext-Notizen (size_gate), vor der Suche (search_gate) und Abschluss
+    (wrap_up): Ist Arbeitsstand.md seit dem
     Aufgabenstart unverändert, einmal zurückhalten, damit das Eintragen vor der Abschlussmeldung passiert."""
     vault = vault_root(required=False)
     if not vault:
@@ -1305,7 +1399,10 @@ def hook_pre_tool(payload: dict) -> None:
     tool = payload.get("tool_name", "")
     sid = payload.get("session_id", "")
     if tool in GATE_TOOLS:
-        search_gate(vault, sid, tool, payload.get("tool_input") or {})
+        ti = payload.get("tool_input") or {}
+        if tool in WRITE_TOOLS and size_gate(vault, tool, ti):
+            return
+        search_gate(vault, sid, tool, ti)
         return
     if tool not in END_TOOLS:
         return

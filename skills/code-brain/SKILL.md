@@ -52,7 +52,7 @@ Nicht dokumentieren: Smalltalk, Wissensfragen ohne Wert für später, Zwischensc
 - Stichpunkte, keine Prosa, jede Notiz für sich verständlich. Flüchtige Fakten datieren ("CI grün, Stand 2026-10-19").
 - Links mit Pfad: `[[projekte/<slug>/arbeitspakete/74-berichte-detail|#74]]`.
 - Nichts erfinden, Unbekanntes als `TBD`. Keine Zugangsdaten, nur Verweis ("Key in `Backend/.env`") - sonst stoppt der Commit.
-- `Projekt.md` und `Arbeitsstand.md` unter 2.800 Zeichen, `Arbeitsregeln.md` unter 2.200: Was darüber liegt, wird beim Start abgeschnitten. `check` meldet es.
+- `Projekt.md` und `Arbeitsstand.md` unter 2.800 Zeichen, `Arbeitsregeln.md` unter 2.200: Was darüber liegt, wird beim Start abgeschnitten. Je Eintrag eine Zeile; Details, Belege und Befunde gehören ins Arbeitspaket (verlinken). Der Hook sperrt Schreibvorgänge über die Grenze - dann kürzer schreiben, nicht umgehen.
 
 ## 6. Was automatisch passiert
 
@@ -64,7 +64,9 @@ Nicht dokumentieren: Smalltalk, Wissensfragen ohne Wert für später, Zwischensc
 | Abschluss (`wrap_up`) oder alle Todos erledigt | Hinweis Aufgabenende (3.4) - nur wenn `Arbeitsstand.md` seit dem Start unverändert ist |
 | Nachricht des Nutzers, alle 10 Min. | Pull nachholen; neue Einträge anderer Geräte → Hinweis, betroffene Notizen neu lesen. Start-Pull gescheitert (offline) → Warnung im Kontext, neuer Versuch bei jeder Nachricht |
 | Nachricht des Nutzers | Hinweis nach 8 Nachrichten ohne Eintrag oder nach einer abgebrochenen Antwort |
-| Notiz geschrieben | Formatprüfung (Frontmatter, Stichworte, Zugangsdaten) |
+| Write/Edit an `Projekt.md`, `Arbeitsstand.md`, `Arbeitsregeln.md` | gesperrt, wenn die Notiz danach über der Grenze läge und wächst; Kürzen bleibt immer erlaubt |
+| Notiz geschrieben | Formatprüfung (Frontmatter, Stichworte, Zugangsdaten, Größe) |
+| Session-Start mit zu langer Notiz (z. B. in Obsidian oder per Shell geändert) | Warnung oben im Kontext: Datei ganz lesen und als Erstes kürzen |
 | nach jeder Antwort, vor Komprimierung, Session-Ende | Commit + Push des Vaults, blockiert nie |
 
 Der Startkontext ist schon da - lies `Projekt.md` und `Arbeitsstand.md` nicht noch einmal. Ausnahme: Ein Hinweis meldet neue Einträge anderer Geräte oder einen gescheiterten Sync - dann die genannten Notizen neu lesen; bei gescheitertem Sync dem Nutzer einmal sagen, dass Einträge anderer Geräte fehlen können. Pfad zu `vault.py` und zum Projektordner nennt der Startkontext.
